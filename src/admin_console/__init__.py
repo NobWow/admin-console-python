@@ -26,7 +26,26 @@ import importlib
 import types
 import datetime
 import logging
+import re
 from math import ceil
+
+
+argsplitter = re.compile('(?<!\\\\)".*?(?<!\\\\)"|(?<!\\\\)\'.*?(?<!\\\\)\'|[^ ]+')
+backslasher = re.compile(r'(?<!\\)\\(.)')
+allescapesplitter = re.compile(r'(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-7]{1,3}|\\[abfnrtv])')
+octal = re.compile(r'\\[0-7]{1,3}')
+quoted = re.compile(r'(?P<quote>["\']).*?(?P=quote)')
+hexescapefinder = re.compile('(?<!\\\\)\\\\x[0-9a-fA-F]{2}')
+single_char_escaper = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    " ": " "
+}
 
 
 def str_findall_unescaped(str_: str, char: int):
@@ -40,25 +59,21 @@ def str_findall_unescaped(str_: str, char: int):
 
 
 def parse_escapes(inp: str):
-    """Convert hexadecimal escape code sequences \\xNN into actual symbols"""
-    res = ''
-    _last = -4
-    for i in range(inp.count('\\x') + 1):
-        _nlast = inp.find('\\x', _last + 4)
-        if _nlast == -1:
-            res += inp[_last + 4:len(inp)]
-            break
-        res += inp[max(_last + 4, 0):_nlast]
-        try:
-            hexdata = inp[_nlast + 2:_nlast + 4]
-            res += bytes.fromhex(hexdata).decode()
-        except IndexError:
-            pass
-        _last = _nlast
-    if res:
-        return res
-    else:
-        return inp
+    """Convert all escape code sequences into actual symbols
+    The list of the escape codes is similar to Python string escape sequences"""
+    body = allescapesplitter.split(inp)
+    for i in range(len(body)):
+        if body[i] == "\\\\":
+            body[i] = "\\"
+        elif body[i].startswith('\\x'):
+            body[i] = chr(int(body[i][2:], base=16))
+        elif body[i].startswith('\\u'):
+            body[i] = chr(int(body[i][2:], base=16))
+        elif octal.fullmatch(body[i]):
+            body[i] = chr(int(body[i][1:], base=8))
+        elif len(body[i]) == 2 and body[i][0] == "\\" and body[i][1] in single_char_escaper:
+            body[i] = single_char_escaper[body[i][1:]]
+    return ''.join(body)
 
 
 def validate_convert_args(argtypes: tuple, args: list):  # return list if arguments are valid, int if error (index of invalid arg)
@@ -594,6 +609,7 @@ class AdminCommandExecutor():
         """
         args = []
         cmdname, _, argl = cmdline.partition(' ')
+        argl = argl.strip()
         if cmdname not in self.commands:
             self.print(self.lang['nocmd'] % cmdname)
             return
@@ -604,11 +620,16 @@ class AdminCommandExecutor():
                     args.append(parse_escapes(argl))
                     argl = ''
                     break
-                if not argl:
+                # arg, _, argl = argl.partition(' ')
+                argmatch = argsplitter.search(argl)
+                if not argmatch:
                     self.print(self.lang['notenoughargs'] % (len(cmd.args), len(args)))
                     self.print(self.usage(cmdname))
                     return
-                arg, _, argl = argl.partition(' ')
+                arg = argl[argmatch.start():argmatch.end()]
+                argl = argl[argmatch.end():]
+                if quoted.fullmatch(arg) is not None:
+                    arg = arg[1:-1]
                 try:
                     if argtype is bool:
                         args.append(True if arg.lower() in ['true', 'yes', 'y', '1'] else False)
@@ -628,7 +649,11 @@ class AdminCommandExecutor():
                     break
                 elif not argl:
                     break
-                arg, _, argl = argl.partition(' ')
+                argmatch = argsplitter.search(argl)
+                arg = argl[argmatch.start():argmatch.end()]
+                argl = argl[argmatch.end() - 1:]
+                if quoted.fullmatch(arg) is not None:
+                    arg = arg[1:-1]
                 try:
                     if argtype is bool:
                         args.append(True if arg.lower() in ['true', 'yes', 'y', '1'] else False)
