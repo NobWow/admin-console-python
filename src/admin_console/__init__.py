@@ -689,7 +689,7 @@ class AdminCommandExecutor():
         # loop = asyncio.get_event_loop()
         # loop.add_signal_handler(2, self.ctrl_c)
         while self.prompt_dispatching:
-            inp = await self.ainput.prompt_line('%s%s ' % (self.promptheader, self.promptarrow))
+            inp = await self.ainput.prompt_line('%s%s ' % (self.promptheader, self.promptarrow), prompt_formats=self.prompt_format, input_formats=self.input_format)
             if not inp:
                 continue
             if self.prompt_dispatching:
