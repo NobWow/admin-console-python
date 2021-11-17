@@ -19,7 +19,7 @@ if __name__ == "__main__":
 """
 import asyncio
 import traceback
-from ainput import AsyncRawInput, colors
+from .ainput import AsyncRawInput, colors
 import json
 import os
 import importlib
