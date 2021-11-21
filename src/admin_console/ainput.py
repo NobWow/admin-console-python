@@ -204,6 +204,10 @@ class AsyncRawInput():
                 await read_clk.wait()
                 self.loop.remove_reader(self.stdin.fileno())
                 read_clk.clear()
+                keystroke = ''.join(key)
+                if keystroke in self.keystrokes:
+                    await self.keystrokes[keystroke]()
+                    continue
                 if len(key) == 1:
                     if ord(key[0]) == 127 or ord(key[0]) == 8:
                         # do backspace
@@ -225,10 +229,6 @@ class AsyncRawInput():
                         break
                 elif ord(key[0]) == 27 and len(key) == 3:
                     # probably arrow keys or other keystrokes
-                    keystroke = ''.join(key)
-                    if keystroke in self.keystrokes:
-                        await self.keystrokes[keystroke]()
-                        continue
                     if keystroke == '\33[D':
                         # cursor left
                         if self.cursor > 0:
