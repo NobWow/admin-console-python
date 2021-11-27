@@ -570,7 +570,7 @@ class AdminCommandExecutor():
         """
         try:
             file = open(path, 'w')
-            self.config = json.dumps(self.config, indent=True)
+            file.write(json.dumps(self.config, indent=True))
             file.close()
             return True
         except OSError:
