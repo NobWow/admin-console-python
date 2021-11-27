@@ -23,13 +23,16 @@ from .ainput import AsyncRawInput, colors
 import json
 import os
 import importlib
+import importlib.util
 import types
 import datetime
 import logging
 import re
 from math import ceil
+from typing import Union, Sequence, Tuple, Type, Mapping, Awaitable, Dict, List, Set, Optional
 
 
+ArgumentType = Union[str, int, float, bool, None]
 argsplitter = re.compile('(?<!\\\\)".*?(?<!\\\\)"|(?<!\\\\)\'.*?(?<!\\\\)\'|[^ ]+')
 backslasher = re.compile(r'(?<!\\)\\(.)')
 allescapesplitter = re.compile(r'(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-7]{1,3}|\\[abfnrtv])')
@@ -58,6 +61,14 @@ def str_findall_unescaped(str_: str, char: int):
     return list_
 
 
+class InvalidArgument(Exception):
+    pass
+
+
+class NotEnoughArguments(Exception):
+    pass
+
+
 def parse_escapes(inp: str):
     """Convert all escape code sequences into actual symbols
     The list of the escape codes is similar to Python string escape sequences"""
@@ -76,7 +87,7 @@ def parse_escapes(inp: str):
     return ''.join(body)
 
 
-def validate_convert_args(argtypes: tuple, args: list):  # return list if arguments are valid, int if error (index of invalid arg)
+def validate_convert_args(argtypes: Tuple[ArgumentType, str], args: Sequence) -> Union[Sequence[object], int]:  # return list if arguments are valid, int if error (index of invalid arg)
     """Validate and cast string variables into their specified type from argtypes"""
     cargs = []
     for i in range(len(args)):
@@ -87,7 +98,7 @@ def validate_convert_args(argtypes: tuple, args: list):  # return list if argume
             return i
 
 
-def paginate_list(list_: list, elemperpage: int, cpage: int) -> (int, list):
+def paginate_list(list_: Sequence[object], elemperpage: int, cpage: int) -> (int, Sequence[object]):
     """Extract a page from a list
     Parameters
     ----------
@@ -135,11 +146,12 @@ def paginate_range(count: int, elemperpage: int, cpage: int) -> (int, int, int):
 
 
 class AdminCommand():
-
-    def __init__(self, afunc, name: str, args: list, optargs: list, description: str = '', atabcomplete=None):
-        """Represents a console command.
-        To add a command of an extension, use AdminCommandExtension.add_command(
-            afunc, name, args, optargs, description) instead
+    """Represents a console command.
+    To add a command of an extension, use AdminCommandExtension.add_command(
+        afunc, name, args, optargs, description) instead
+    """
+    def __init__(self, afunc, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]], description: str = '', atabcomplete: Optional[Awaitable[Sequence[str]]] = None):
+        """
         Parameters
         ----------
         afunc : coroutine
@@ -148,7 +160,7 @@ class AdminCommand():
         name : str
             Name of the command
         args : list
-            [(type : class, name : str), ...]
+            [(type : type, name : str), ...]
             List of the mandatory arguments of the command
 
             Possible types are: str, int, float, bool, None
@@ -169,7 +181,7 @@ class AdminCommand():
         atabcomplete : coroutine
             await atabcomplete(AdminCommandExecutor, *args)
             Coroutine function that is called when a tab with the last incomplete or empty argument is specified
-            Must return None or a list of suggested arguments
+            Must return None or a collection of suggested arguments
         """
         self.name = name
         self.args = args  # tuple (type, name)
@@ -180,22 +192,26 @@ class AdminCommand():
         self.afunc = afunc  # takes AdminCommandExecutor and custom args
         self.atabcomplete = atabcomplete
 
-    async def execute(self, executor, args):
+    async def execute(self, executor, args: Sequence[object]):
         """Shouldn't be overriden, use afunc to assign a functor to the command"""
         await self.afunc(executor, *args)
 
-    async def tab_complete(self, executor, args):
+    async def tab_complete(self, executor, args: Sequence[object]) -> Union[tuple, None]:
         """Shouldn't be overriden, use atabcomplete to assign a tab complete handler"""
+        if self.atabcomplete:
+            return await self.atabcomplete(executor, *args)
 
 
 class AdminCommandExtension():
+    """Extension data class. Constructed by AdminCommandExecutor.
+    In extension scripts the instance is passed into:
+        async def extension_init(AdminCommandExtension)
+            called when an extension is loaded
+        async def extension_cleanup(AdminCommandExtension)
+            called when an extension is unloaded
+    """
     def __init__(self, ACE, name: str, module: types.ModuleType, logger: logging.Logger = logging.getLogger('main')):
-        """Extension data class. Constructed by AdminCommandExecutor.
-        In extension scripts the instance is passed into:
-            async def extension_init(AdminCommandExtension)
-                called when an extension is loaded
-            async def extension_cleanup(AdminCommandExtension)
-                called when an extension is unloaded
+        """
         Parameters
         ----------
         ACE : AdminCommandExecutor
@@ -219,7 +235,7 @@ class AdminCommandExtension():
         self.name = name
         self.logger = logger
 
-    def sync_local_commands(self, overwrite=False):
+    def sync_local_commands(self, overwrite=False) -> bool:
         """Adds all the extension commands into AdminCommandExecutor commands list
         Parameters
         ----------
@@ -243,7 +259,7 @@ class AdminCommandExtension():
         else:
             return False
 
-    def add_command(self, afunc, name: str, args: list, optargs: list = [], description: str = '', replace=False):
+    def add_command(self, afunc: Awaitable, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]] = [], description: str = '', replace=False) -> bool:
         """Registers a command and adds it to the AdminCommandExecutor.
         Constructs an AdminCommand instance with all the arguments passed.
         Doesn't require sync_local_commands() to be run
@@ -266,7 +282,7 @@ class AdminCommandExtension():
         else:
             return False
 
-    def remove_command(self, name: str, remove_native=False):
+    def remove_command(self, name: str, remove_native=False) -> bool:
         """Unregisters a command from the AdminCommandExtension and/or from an AdminCommandExecutor
         If remove_native is True, it doesn't check whether or not this command is owned by this extension
         Parameters
@@ -294,7 +310,7 @@ class AdminCommandExtension():
                 del self.ace.commands[name]
             return True
 
-    def clear_commands(self):
+    def clear_commands(self) -> bool:
         """Clear all the commands registered by this extension
 
         Returns
@@ -309,7 +325,7 @@ class AdminCommandExtension():
             return False
         return True
 
-    def msg(self, msg):
+    def msg(self, msg: str):
         """Show message in the console with the extension prefix"""
         self.ace.print('[%s] %s' % (self.name, msg))
 
@@ -374,11 +390,17 @@ class AdminCommandExecutor():
         Formatting of the prompt header and arrow.
     self.input_format = {'fgcolor': 10}
         Formatting of the user input in terminal
+    self.tab_complete_lastinp = ''
+        Contains last input on last tabcomplete call
+    self.tab_complete_tuple = tuple()
+        Contains last argument suggestions on tab complete call
+    self.tab_complete_id = 0
+        Contains currently cycled element ID in self.tab_complete_tuple
     Others:
     self.print = self.ainput.writeln
     self.logger = logger
     """
-    def __init__(self, stuff: dict = {}, use_config=True, logger: logging.Logger = None, extension_path='extensions/'):
+    def __init__(self, stuff: Mapping = {}, use_config=True, logger: logging.Logger = None, extension_path='extensions/'):
         """
         Parameters
         ----------
@@ -393,40 +415,43 @@ class AdminCommandExecutor():
         """
         self.stuff = stuff
         self.use_config = use_config
-        self.commands = {}
-        self.lang = {
+        self.commands: Dict[str, AdminCommand] = {}
+        self.lang: Dict[str, str] = {
             'nocmd': '%s: unknown command',
             'usage': 'Usage: %s',
             'invalidarg': '%s is invalid, check your command arguments.',
             'toomanyargs': 'warning: this command receives %s arguments, you provided %s or more',
             'notenoughargs': 'not enough arguments: the command receives %s arguments, you provided %s.'
         }
-        self.types = {
+        self.types: Dict[ArgumentType, str] = {
             str: 'word',
             int: 'n',
             float: 'n.n',
             bool: 'yes / no',
             None: 'text...'
         }
-        self.tasks = {
+        self.tasks: Dict[str, asyncio.Task] = {
             # 'task_name': asyncio.Task()
         }
-        self.extensions = {
+        self.extensions: Dict[str, AdminCommandExtension] = {
             # 'extension name': AdminCommandExtension()
         }
-        self.full_cleanup_steps = set(
+        self.full_cleanup_steps: Set[Awaitable] = set(
             # awaitable functions
         )
         self.extpath = extension_path
         self.prompt_dispatching = True
         self.promptheader = 'nothing'
         self.promptarrow = '>'
-        self.history = []
+        self.history: List[str] = []
         self.ainput = AsyncRawInput(history=self.history)
         self.ainput.ctrl_c = self.full_cleanup
         self.prompt_format = {'bold': True, 'fgcolor': colors.GREEN}
         self.input_format = {'fgcolor': 10}
         self.logger = logger
+        self.tab_complete_lastinp = ''
+        self.tab_complete_tuple: Sequence[str] = tuple()
+        self.tab_complete_id = 0
         if use_config:
             self.load_config()
 
@@ -504,7 +529,7 @@ class AdminCommandExecutor():
                 self.error('Module file %s not found' % name)
             await self.load_extension(name.split('.')[0])
 
-    def load_config(self, path: str = 'config.json'):
+    def load_config(self, path: str = 'config.json') -> bool:
         """Loads a configuration from a JSON file
 
         Parameters
@@ -530,7 +555,7 @@ class AdminCommandExecutor():
             self.error("Configuration file is not found")
             return False
 
-    def save_config(self, path: str = 'config.json'):
+    def save_config(self, path: str = 'config.json') -> bool:
         """Saves a configuration into a JSON file
 
         Parameters
@@ -552,7 +577,7 @@ class AdminCommandExecutor():
             self.error('Failed to save configuration at %s' % path)
             return False
 
-    async def load_extension(self, name: str):
+    async def load_extension(self, name: str) -> bool:
         """Loads a Python script as an extension from its extension path and call await extension_init(AdminCommandExtension)
 
         Parameters
@@ -581,7 +606,7 @@ class AdminCommandExecutor():
             self.error("Failed to load extension %s:\n%s" % (name, traceback.format_exc()))
             return False
 
-    async def unload_extension(self, name: str, keep_dict=False):
+    async def unload_extension(self, name: str, keep_dict=False) -> bool:
         """Unload an extension and call await extension_cleanup(AdminCommandExtension)
         Parameters
         ----------
@@ -610,28 +635,34 @@ class AdminCommandExecutor():
             self.error("Failed to call cleanup in %s:\n%s" % (name, traceback.format_exc()))
             return False
 
-    async def dispatch(self, cmdline: str):
-        """Executes a command. Shouldn't be used explicitly. Use prompt_loop() instead.
+    def parse_args(self, argl: str, argtypes: Sequence[Tuple[ArgumentType, str]] = None, opt_argtypes: Sequence[Tuple[ArgumentType, str]] = None, *, raise_exc=True) -> (list, str):
+        """
+        Smart split the argument line and convert all the arguments to its types
+        Raises InvalidArgument(argname) if one of the arguments couldn't be converted
+        Raises NotEnoughArguments(len(args)) if there isn't enough arguments provided
 
         Parameters
         ----------
-        cmdline : str
-            A whole line representing a command
+        argl : str
+            Argument line with raw space-separated arguments
+        argtypes : list
+            Any collection containing a tuples (type, name) representing an argument name and type
+            The arguments that are listed in there are mandatory.
+        opt_argtypes : list
+            Same as argtypes, but those arguments are parsed after mandatory and are optional.
+            Doesn't cause NotEnoughArguments to be raise if there is not enough optional arguments
+        raise_exc : bool
+            Whether or not exceptions are raised. If False, data is returned as it is
 
         Returns
         -------
-        bool
-            Success
+        list, str
+            A list of converted arguments and the remnant
+            If remnant isn't an empty string, then there is probably too many arguments provided
         """
         args = []
-        cmdname, _, argl = cmdline.partition(' ')
-        argl = argl.strip()
-        if cmdname not in self.commands:
-            self.print(self.lang['nocmd'] % cmdname)
-            return
-        cmd: AdminCommand = self.commands[cmdname]
-        if cmd.args:
-            for argtype, argname in cmd.args:
+        if argtypes:
+            for argtype, argname in argtypes:
                 if argtype is None:
                     args.append(parse_escapes(argl))
                     argl = ''
@@ -639,9 +670,10 @@ class AdminCommandExecutor():
                 # arg, _, argl = argl.partition(' ')
                 argmatch = argsplitter.search(argl)
                 if not argmatch:
-                    self.print(self.lang['notenoughargs'] % (len(cmd.args), len(args)))
-                    self.print(self.usage(cmdname))
-                    return
+                    if raise_exc:
+                        raise NotEnoughArguments(len(argtypes), len(args))
+                    else:
+                        return args, argl
                 arg = argl[argmatch.start():argmatch.end()]
                 argl = argl[argmatch.end():]
                 if quoted.fullmatch(arg) is not None:
@@ -654,11 +686,13 @@ class AdminCommandExecutor():
                     else:
                         args.append(argtype(arg))
                 except ValueError:
-                    self.print(self.lang['invalidarg'] % argname)
-                    self.print(self.usage(cmdname))
-                    return
-        if cmd.optargs:
-            for argtype, argname in cmd.optargs:
+                    if raise_exc:
+                        raise InvalidArgument(argname)
+                    else:
+                        args.append(arg)
+                        return args, argl
+        if opt_argtypes:
+            for argtype, argname in opt_argtypes:
                 if argtype is None and argl:
                     args.append(argl)
                     argl = ''
@@ -667,7 +701,7 @@ class AdminCommandExecutor():
                     break
                 argmatch = argsplitter.search(argl)
                 arg = argl[argmatch.start():argmatch.end()]
-                argl = argl[argmatch.end() - 1:]
+                argl = argl[argmatch.end():]
                 if quoted.fullmatch(arg) is not None:
                     arg = arg[1:-1]
                 try:
@@ -678,19 +712,49 @@ class AdminCommandExecutor():
                     else:
                         args.append(argtype(arg))
                 except ValueError:
-                    self.print(self.lang['invalidarg'] % argname)
-                    self.print(self.usage(cmdname))
-                    return
-        if argl:
-            self.print(self.lang['toomanyargs'] % (len(cmd.args) + len(cmd.optargs), len(args) + 1))
-            self.print(self.usage(cmdname))
+                    if raise_exc:
+                        raise InvalidArgument(argname)
+                    else:
+                        args.append(arg)
+                        return args, argl
+        return args, argl
+
+    async def dispatch(self, cmdline: str) -> bool:
+        """Executes a command. Shouldn't be used explicitly. Use prompt_loop() instead.
+
+        Parameters
+        ----------
+        cmdline : str
+            A whole line representing a command
+
+        Returns
+        -------
+        bool
+            Success
+        """
+        cmdname, _, argl = cmdline.partition(' ')
+        argl = argl.strip()
+        if cmdname not in self.commands:
+            self.print(self.lang['nocmd'] % cmdname)
+            return
+        cmd: AdminCommand = self.commands[cmdname]
         try:
+            args, argl = self.parse_args(argl, cmd.args, cmd.optargs)
+            if argl:
+                self.print(self.lang['toomanyargs'] % (len(cmd.args) + len(cmd.optargs), len(args) + 1))
+                self.print(self.usage(cmdname))
             await cmd.execute(self, args)
+        except NotEnoughArguments as exc:
+            self.print(self.lang['notenoughargs'] % (len(cmd.args), exc.args[0]))
+            self.print(self.usage(cmdname))
+        except InvalidArgument as exc:
+            self.print(self.lang['invalidarg'] % exc.args[0])
+            self.print(self.usage(cmdname))
         except Exception as exc:
             self.print("An exception just happened in this command, check logs or smth...")
             self.error("Command execution failed: %s" % exc)
 
-    def usage(self, cmdname: str, lang=True):
+    def usage(self, cmdname: str, lang=True) -> str:
         """Get a formatted usage string for the command
         Raises KeyError if the command doesn't exist.
 
@@ -727,6 +791,7 @@ class AdminCommandExecutor():
         Prefer launching in asyncio.Task wrapper.
         """
         self.ainput.prepare()
+        self.ainput.add_keystroke('\t', self._tab_complete)
         # loop = asyncio.get_event_loop()
         # loop.add_signal_handler(2, self.ctrl_c)
         while self.prompt_dispatching:
@@ -739,6 +804,7 @@ class AdminCommandExecutor():
                     await self.tasks['prompt_cmd']
                 except asyncio.CancelledError:
                     pass
+        self.ainput.remove_keystroke('\t')
         self.ainput.end()
 
     async def full_cleanup(self):
@@ -749,25 +815,64 @@ class AdminCommandExecutor():
         for func in self.full_cleanup_steps:
             await func(self)
 
-    async def tab_complete(self):
+    async def _tab_complete(self):
         """This is callback function for TAB key event
            Uses AsyncRawInput data to handle the text update
         """
-        inp = self.ainput.read_lastinp[0:self.ainput.cursor]
-        if not inp:
+        inp = ''.join(self.ainput.read_lastinp[0:self.ainput.cursor])
+        if not inp or not self.prompt_dispatching:
             return
-        if self.prompt_dispatching:
-            self.tasks['prompt_cmd'] = asyncio.create_task(self.dispatch(inp))
-            try:
-                await self.tasks['prompt_cmd']
-            except asyncio.CancelledError:
-                if self.prompt_dispatching:
-                    self.print("Process has been cancelled")
+        if self.tab_complete_lastinp != inp:
+            # generate new suggestions and replace last argument
+            cmdname, sep, argl = inp.partition(' ')
+            if not sep:
+                # generate list of command suggestions
+                self.tab_complete_tuple = []
+                for cmdname in self.commands:
+                    if cmdname.startswith(inp):
+                        self.tab_complete_tuple.append(cmdname)
+                self.tab_complete_id = 0
+                self.ainput.writeln('\t'.join(self.tab_complete_tuple), fgcolor=colors.GREEN)
+            else:
+                argl = argl.strip()
+                if cmdname not in self.commands:
+                    return
+                cmd: AdminCommand = self.commands[cmdname]
+                try:
+                    args, argl = self.parse_args(argl, cmd.args, cmd.optargs, raise_exc=False)
+                    if argl:
+                        self.print(self.lang['toomanyargs'] % (len(cmd.args) + len(cmd.optargs), len(args) + 1))
+                        self.print(repr(argl))
+                        self.print(self.usage(cmdname))
+                    suggestions = await cmd.tab_complete(self, args)
+                    if suggestions is not None:
+                        self.ainput.writeln('\t'.join(suggestions), fgcolor=colors.GREEN)
+                    self.tab_complete_tuple = suggestions
+                    self.tab_complete_id = 0
+                except asyncio.CancelledError:
+                    if self.prompt_dispatching:
+                        self.print("Process has been cancelled")
+            self.tab_complete_lastinp = inp
+        elif self.tab_complete_tuple:
+            # cycle through the suggestions and replace last argument
+            self.tab_complete_id = (self.tab_complete_id + 1) % len(self.tab_complete_tuple)
+        # replace last argument
+        if self.tab_complete_tuple:
+            _, _, last_arg = inp.rpartition(' ')
+            target = self.tab_complete_tuple[self.tab_complete_id]
+            if not last_arg:
+                self.ainput.read_lastinp.extend(target)
+            else:
+                self.ainput.read_lastinp[-len(last_arg):] = target
+            self.ainput.cursor = len(self.ainput.read_lastinp)
+            self.ainput.redraw_lastinp(1)
+            inp = ''.join(self.ainput.read_lastinp[0:self.ainput.cursor])
+            self.tab_complete_lastinp = inp
 
 
 def basic_command_set(ACE: AdminCommandExecutor):
-
     async def exitquit(self: AdminCommandExecutor):
+        self.print("Command prompt is closing")
         self.prompt_dispatching = False
         try:
             await self.full_cleanup()
@@ -821,13 +926,45 @@ def basic_command_set(ACE: AdminCommandExecutor):
             self.print("%s is unloaded but failed to cleanup." % name)
         else:
             self.print("%s unloaded." % name)
+
+    async def extunload_tab(self: AdminCommandExecutor, *args):
+        name = args[0]
+        res = []
+        for extname in self.extensions:
+            if extname.startswith(name):
+                res.append(extname)
+        return res
     ACE.commands['extunload'] = \
         ACE.commands['unloadext'] = \
         ACE.commands['extremove'] = \
         ACE.commands['removeext'] = \
         ACE.commands['extensionremove'] = \
         ACE.commands['removeextension'] = \
-        AdminCommand(extunload, 'extunload', [(None, 'name (without .py)')], [], 'Unload an extension')
+        AdminCommand(extunload, 'extunload', [(None, 'name (without .py)')], [], 'Unload an extension', extunload_tab)
+
+    async def extreload(self: AdminCommandExecutor, name: str):
+        res = await self.unload_extension(name)
+        if res is None:
+            self.print("%s is not loaded or non-existant extension." % name)
+        elif res is False:
+            self.print("%s is unloaded but failed to cleanup." % name)
+        else:
+            self.print("%s unloaded." % name)
+            if not await self.load_extension(name):
+                self.print("%s failed to load." % name)
+                return
+            else:
+                self.print("%s loaded." % name)
+    ACE.commands['extreload'] = \
+        ACE.commands['reloadext'] = \
+        ACE.commands['extrestart'] = \
+        ACE.commands['reloadextension'] = \
+        ACE.commands['extensionreload'] = \
+        ACE.commands['restartextension'] = \
+        ACE.commands['extensionrestart'] = \
+        ACE.commands['relext'] = \
+        ACE.commands['extrel'] = \
+        AdminCommand(extreload, 'extreload', [(None, 'name (without .py)')], [], 'Reload an extension', extunload_tab)
 
     async def date(self: AdminCommandExecutor):
         date = datetime.datetime.now()
@@ -837,6 +974,16 @@ def basic_command_set(ACE: AdminCommandExecutor):
     async def error(self: AdminCommandExecutor):
         self.error("Stderr!")
     ACE.commands['error'] = AdminCommand(error, 'error', [], [], 'Test error')
+
+    async def testoptargs(self: AdminCommandExecutor, mand1: str, opt1: int = 0, opt2: str = '', opt3: int = 0):
+        self.print(mand1, opt1, opt2, opt3)
+
+    async def testoptargs_tab(self: AdminCommandExecutor, *args):
+        if len(args) == 0:
+            return "example", "another", "main", "obsolete"
+        elif len(args) == 2:
+            return "optional", "not", "needed"
+    ACE.commands['testoptargs'] = AdminCommand(testoptargs, 'testoptargs', [(str, 'mandatory')], ((int, 'opt1'), (str, 'opt2'), (int, 'opt3')))
 
 
 async def main():
