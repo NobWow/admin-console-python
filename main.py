@@ -1,6 +1,6 @@
 import asyncio
 import sys
-from src.admin_console import *
+from src.admin_console import AdminCommandExecutor, basic_command_set, colors
 
 
 async def main(args):

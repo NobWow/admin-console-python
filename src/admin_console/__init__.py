@@ -136,7 +136,7 @@ def paginate_range(count: int, elemperpage: int, cpage: int) -> (int, int, int):
 
 class AdminCommand():
 
-    def __init__(self, afunc, name: str, args: list, optargs: list, description: str = ''):
+    def __init__(self, afunc, name: str, args: list, optargs: list, description: str = '', atabcomplete=None):
         """Represents a console command.
         To add a command of an extension, use AdminCommandExtension.add_command(
             afunc, name, args, optargs, description) instead
@@ -166,6 +166,10 @@ class AdminCommand():
             Types are described in args
         description : str
             Description of what this command does. Shows in help
+        atabcomplete : coroutine
+            await atabcomplete(AdminCommandExecutor, *args)
+            Coroutine function that is called when a tab with the last incomplete or empty argument is specified
+            Must return None or a list of suggested arguments
         """
         self.name = name
         self.args = args  # tuple (type, name)
@@ -174,10 +178,14 @@ class AdminCommand():
         # if type is None then it is the last raw-string argument
         self.description = description
         self.afunc = afunc  # takes AdminCommandExecutor and custom args
+        self.atabcomplete = atabcomplete
 
     async def execute(self, executor, args):
         """Shouldn't be overriden, use afunc to assign a functor to the command"""
         await self.afunc(executor, *args)
+
+    async def tab_complete(self, executor, args):
+        """Shouldn't be overriden, use atabcomplete to assign a tab complete handler"""
 
 
 class AdminCommandExtension():
@@ -418,10 +426,18 @@ class AdminCommandExecutor():
         self.ainput.ctrl_c = self.full_cleanup
         self.prompt_format = {'bold': True, 'fgcolor': colors.GREEN}
         self.input_format = {'fgcolor': 10}
-        self.print = self.ainput.writeln
         self.logger = logger
         if use_config:
             self.load_config()
+
+    def print(self, *value, sep=' ', end='\n'):
+        """Prints a message in the console, preserving the prompt and user input, if any
+        Partially copies the Python print() command"""
+        str_ = sep.join(str(element) for element in value)
+        if end == '\n':
+            self.ainput.writeln(str_)
+        else:
+            self.ainput.write(str_)
 
     def error(self, msg: str):
         """Shows a red error message in the console and logs.
@@ -722,10 +738,8 @@ class AdminCommandExecutor():
                 try:
                     await self.tasks['prompt_cmd']
                 except asyncio.CancelledError:
-                    if self.prompt_dispatching:
-                        self.print("Process has been cancelled")
+                    pass
         self.ainput.end()
-        self.print('Exit from command prompt.')
 
     async def full_cleanup(self):
         """Perform cleanup steps in AdminCommandExecutor.full_cleanup_steps
@@ -734,6 +748,21 @@ class AdminCommandExecutor():
         self.ainput.is_reading = False
         for func in self.full_cleanup_steps:
             await func(self)
+
+    async def tab_complete(self):
+        """This is callback function for TAB key event
+           Uses AsyncRawInput data to handle the text update
+        """
+        inp = self.ainput.read_lastinp[0:self.ainput.cursor]
+        if not inp:
+            return
+        if self.prompt_dispatching:
+            self.tasks['prompt_cmd'] = asyncio.create_task(self.dispatch(inp))
+            try:
+                await self.tasks['prompt_cmd']
+            except asyncio.CancelledError:
+                if self.prompt_dispatching:
+                    self.print("Process has been cancelled")
 
 
 def basic_command_set(ACE: AdminCommandExecutor):
