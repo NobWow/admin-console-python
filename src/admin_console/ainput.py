@@ -398,7 +398,7 @@ class AsyncRawInput():
                         else:
                             await self.ctrl_c()
                         continue
-                    elif ord(key[0]) == 13:
+                    elif ord(key[0]) == 13 or ord(key[0]) == 10:
                         # submit the input
                         break
                 elif ord(key[0]) == 27 and len(key) == 3:
