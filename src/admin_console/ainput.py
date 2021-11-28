@@ -184,7 +184,6 @@ class AsyncRawInput():
         self.stdout = stdout
         self.read_lastinp: list = []  # mutability but extra memory consumption
         self.read_lastprompt = ''
-        self.old_tcattrs = termios.tcgetattr(0)
         self.history = history
         self.history_limit = history_limit
         self.cursor = 0
