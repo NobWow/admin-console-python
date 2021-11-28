@@ -192,8 +192,6 @@ class AsyncRawInput():
         self.keystrokes = {}
         self.prompt_formats = ('', '')
         self.input_formats = ('', '')
-        if not stdin.isatty():
-            raise RuntimeError("AsyncRawInput object should be attached to a tty-like fd, but non-tty file provided")
 
     def __del__(self):
         self.end()
