@@ -217,6 +217,7 @@ class AsyncRawInput():
             self.stdout.flush()
         termios.tcsetattr(self.stdin.fileno(), termios.TCSANOW, self.old_tcattrs)
         self.is_reading = False
+        self.prepared = False
 
     def set_interrupt_handler(self, awaitable):
         """
