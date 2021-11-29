@@ -128,41 +128,41 @@ class AsyncRawInput():
     """
     Main class for asynchronous input and proper output handling
 
-    Before using its features, AsyncRawInput.prepare() should be called
-    AsyncRawInput.end() is called on object destruction handler
+    Before using its features, self.prepare() should be called
+    self.end() is called on object destruction handler
 
-    AsyncRawInput.loop : asyncio.BaseEventLoop
+    self.loop : asyncio.BaseEventLoop
         Event loop attached to the IO handler
-    AsyncRawInput.is_reading : bool
+    self.is_reading : bool
         Whether or not the user input is currently receiving
-    AsyncRawInput.stdin : io.TextIOWrapper
+    self.stdin : io.TextIOWrapper
         File-like object handling the terminal input
-    AsyncRawInput.stdout : io.TextIOWrapper
+    self.stdout : io.TextIOWrapper
         File-like object handling the terminal output
-    AsyncRawInput.read_lastinp : list
+    self.read_lastinp : list
         List of str, containing each character for a mutable Unicode string
         Represents an unentered user input displaying on the terminal
-    AsyncRawInput.read_lastprompt : str
+    self.read_lastprompt : str
         A prompt. Text prepending the user input line.
-        To format a prompt, set AsyncRawInput.prompt_formats
-    AsyncRawInput.old_tcattrs : list
+        To format a prompt, set self.prompt_formats
+    self.old_tcattrs : list
         List of control terminal arguments that have been set before prepare() called
-    AsyncRawInput.history : list
+    self.history : list
         List of previous user inputs
-    AsyncRawInput.history_limit : int
+    self.history_limit : int
         Threshold of automatic entry deletion of old user inputs
-    AsyncRawInput.cursor : int
+    self.cursor : int
         Current position of the user terminal cursor.
-    AsyncRawInput.echo : bool = True
+    self.echo : bool = True
         Whether or not the user input is shown on the terminal. Don't modify it manually
-    AsyncRawInput.ctrl_c : async function
+    self.ctrl_c : async function
         Async callback that is called when Ctrl + C is pressed in the terminal
-    AsyncRawInput.keystrokes : dict
+    self.keystrokes : dict
         Mapping of keystroke handlers.
         { "raw keystroke code": async callable }
-    AsyncRawInput.prompt_formats : tuple(str, str)
+    self.prompt_formats : tuple(str, str)
         Formatting header, footer pair for displaying a prompt.
-    AsyncRawInput.input_formats : tuple(str, str)
+    self.input_formats : tuple(str, str)
         Formatting header, footer pair for displaying a user input
     """
     def __init__(self, history: list = None, history_limit: int = 30, stdin: io.TextIOWrapper = sys.stdin, stdout: io.TextIOWrapper = sys.stdout, *, loop=None):
@@ -184,6 +184,8 @@ class AsyncRawInput():
         self.stdout = stdout
         self.read_lastinp: list = []  # mutability but extra memory consumption
         self.read_lastprompt = ''
+        self.old_tcattrs: list = None
+        self.prepared = False
         self.history = history
         self.history_limit = history_limit
         self.cursor = 0
@@ -200,7 +202,9 @@ class AsyncRawInput():
         """
         Enables raw mode, saving the old TTY settings. Disables blocking mode for standard input
         """
-        self.old_tcattrs = termios.tcgetattr(self.stdin.fileno())
+        if not self.prepared:
+            self.old_tcattrs = termios.tcgetattr(self.stdin.fileno())
+        self.prepared = True
         os.set_blocking(self.stdin.fileno(), False)
         tty.setraw(self.stdin.fileno())
 
