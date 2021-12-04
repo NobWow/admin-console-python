@@ -590,6 +590,9 @@ class AdminCommandExecutor():
         bool
             Success
         """
+        if name in self.extensions:
+            self.error("Failed to load extension %s: This extension is already loaded.")
+            return False
         spec = importlib.util.spec_from_file_location(name, os.path.join(self.extpath, name + '.py'))
         module = importlib.util.module_from_spec(spec)
         try:
