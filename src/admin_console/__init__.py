@@ -873,6 +873,103 @@ class AdminCommandExecutor():
             self.tab_complete_lastinp = inp
 
 
+class FakeAsyncRawInput():
+    """
+    A helper class for emulating real user input. Used to pipe the IO through custom ways.
+    Doesn't handle any ANSI escape codes at all. Just lets the data go through
+    Works best with AdminCommandEWrapper.
+    See ainput.AsyncRawInput for more info
+    """
+    def __init__(self, ace: AdminCommandExecutor, *args, **kwargs):
+        self.ace: AdminCommandExecutor = ace
+        super().__init__(*args, **kwargs)
+
+    def __del__(self):
+        # end() was here...
+        pass
+
+    def prepare(self):
+        """Do something before handling IO"""
+        # useless!
+        pass
+
+    def end(self):
+        """Do something after IO"""
+        # useless too!
+        pass
+
+    def set_interrupt_handler(self, awaitable):
+        """Ctrl + C event in the real terminal. Useless here"""
+        # I don't support that...
+        self.ace.log("set_interrupt_handler: attempt to change an interrupting callback inside of the fake ARI, which is not supported.", logging.WARNING)
+
+    def add_keystroke(self, keystroke: str, awaitable):
+        """Add a key press event"""
+        # I don't support that either...
+        self.ace.log("add_keystroke: attempt to add a keystroke %s handler, which is not supported by a fake ARI." % repr(keystroke))
+
+    def remove_keystroke(self, keystroke: str):
+        """Remove key press event"""
+        self.ace.log("remove_keystroke: attempt to remove a keystroke %s handler, which is not supported by a fake ARI." % repr(keystroke))
+
+    def write(self, msg: str, **formats):
+        """Send raw data without end of line"""
+        raise NotImplementedError
+
+    def writeln(self, msg: str, **formats):
+        """Send a formatted message line with EOL"""
+        raise NotImplementedError
+
+    def redraw_lastinp(self, at: int):
+        # it's a dummy function here
+        pass
+
+    def prompt_line(self, prompt="", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
+        """Ask a user for input"""
+        raise NotImplementedError
+
+    def prompt_keystroke(self, prompt="", echo=True):
+        """Ask a user to press a key"""
+        raise NotImplementedError
+
+
+class AdminCommandEWrapper(AdminCommandExecutor):
+    """
+    AdminCommandExecutor wrapper. It overlays all the functions from the AdminCommandExecutor, but anything could be replaced to change command behavior, like redirecting its output or providing a different way of IO.
+    It operates with an existing AdminCommandExecutor, if a special keyword argument is specified.
+    Usually it is passed into the command callback instead of the AdminCommandExecutor, like when a command output needs to be handled differently.
+    Useful for a remote console server, or GUI, where command output is sent to a remote client or is shown in a GUI.
+    A proper way to use it is to change its members, for example assigning a different AsyncRawInput or logger implementation.
+    WARNING: this is NOT a sandbox solution for the extensions! This class is used to execute commands in a different way
+    """
+    def __init__(self, *args, ace: AdminCommandExecutor, **kwargs):
+        def wrap_self(origin):
+            if asyncio.iscoroutinefunction(origin):
+                async def new(self_: AdminCommandExecutor, *args, **kwargs):
+                    # replace original AdminCommandExecutor with ourselves
+                    # (note that self_ is substituted with self)
+                    # so the function runs wrapped
+                    return await origin(self, *args, **kwargs)
+            else:
+                def new(self_: AdminCommandExecutor, *args, **kwargs):
+                    return origin(self, *args, **kwargs)
+            return new
+        self.master = ace
+        # Copy members here
+        self.__dict__.update(ace.__dict__)
+        # Transform methods of the proxy into proxy-methods
+        for name in dir(ace):
+            # ignore meta and already copied members
+            if name.startswith('__') or name in ace.__dict__:
+                continue
+            if not callable(getattr(ace, name)):
+                # cannot wrap a non-callable stuff
+                continue
+            # wrap
+            setattr(self, name, wrap_self(getattr(ace.__class__, name)))
+        # and then do anything to alter commands behavior...
+
+
 def basic_command_set(ACE: AdminCommandExecutor):
     async def exitquit(self: AdminCommandExecutor):
         self.print("Command prompt is closing")
