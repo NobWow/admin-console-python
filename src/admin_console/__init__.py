@@ -508,10 +508,10 @@ class AdminCommandExecutor():
 
     async def load_extensions(self):
         """Loads extensions from an extension directory specified in AdminCommandExecutor.extpath"""
-        extlist = set()
+        extlist = []
         if os.path.exists(os.path.join(self.extpath, 'extdep.txt')):
             with open(os.path.join(self.extpath, 'extdep.txt'), 'r') as f:
-                extlist.update('%s.py' % x for x in f.readlines())
+                extlist.extend('%s.py' % x.strip() for x in f.readlines())
         else:
             self.print('Note: create extdep.txt in the extensions folder to sequentally load modules')
         if not os.path.exists(self.extpath):
@@ -523,7 +523,7 @@ class AdminCommandExecutor():
         with os.scandir(self.extpath) as extpath:
             for file in extpath:
                 if file.name.endswith('.py') and file.is_file() and file.name not in extlist:
-                    extlist.add(file.name)
+                    extlist.append(file.name)
         for name in extlist:
             if not os.path.exists(os.path.join(self.extpath, name)):
                 self.error('Module file %s not found' % name)
