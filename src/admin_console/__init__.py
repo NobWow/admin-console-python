@@ -955,6 +955,7 @@ class AdminCommandEWrapper(AdminCommandExecutor):
                     return origin(self, *args, **kwargs)
             return new
         self.master = ace
+        self.own_data = {}
         # Copy members here
         self.__dict__.update(ace.__dict__)
         # Transform methods of the proxy into proxy-methods
