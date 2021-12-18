@@ -9,11 +9,11 @@ async def main(args):
     else:
         extpath = 'extensions/'
     console = AdminCommandExecutor(use_config=False)
+    basic_command_set(console)
     if extpath != "no":
         await console.load_extensions()
     else:
         console.info("not loading extensions")
-    basic_command_set(console)
     console.promptheader = "~test console~ "
     console.promptarrow = ":"
     console.prompt_format = {'bold': True, "fgcolor": colors.BLUE}

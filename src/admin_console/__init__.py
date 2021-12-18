@@ -28,8 +28,10 @@ import types
 import datetime
 import logging
 import re
+import warnings
 from math import ceil
-from typing import Union, Sequence, Tuple, Type, Mapping, Awaitable, Dict, List, Set, Optional
+from typing import Union, Sequence, Tuple, Mapping, Awaitable, Dict, List, Set, Optional
+from collections import ChainMap
 
 
 ArgumentType = Union[str, int, float, bool, None]
@@ -236,7 +238,8 @@ class AdminCommandExtension():
         self.logger = logger
 
     def sync_local_commands(self, overwrite=False) -> bool:
-        """Adds all the extension commands into AdminCommandExecutor commands list
+        """DEPRECATED: since version 1.1.0 admin_console uses collections.ChainMap for command overrides
+        Adds all the extension commands into AdminCommandExecutor commands list
         Parameters
         ----------
         overwrite : bool
@@ -248,16 +251,7 @@ class AdminCommandExtension():
         bool
             Success
         """
-        if not self.commands:
-            return False
-        if overwrite:
-            self.ace.commands.update(self.commands)
-            return True
-        if self.commands.keys().isdisjoint(self.ace.commands.keys()):
-            self.ace.commands.update(self.commands)
-            return True
-        else:
-            return False
+        return False
 
     def add_command(self, afunc: Awaitable, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]] = [], description: str = '', replace=False) -> bool:
         """Registers a command and adds it to the AdminCommandExecutor.
@@ -277,7 +271,6 @@ class AdminCommandExtension():
         cmd = AdminCommand(afunc, name, args, optargs, description)
         if name not in self.ace.commands or (name in self.ace.commands and replace):
             self.commands[name] = cmd
-            self.ace.commands[name] = cmd
             return True
         else:
             return False
@@ -289,26 +282,23 @@ class AdminCommandExtension():
         ----------
         remove_native : bool
             If False, delete only if this command is owned by self
+            Assign a command to AdminCommandExecutor.disabledCmd in case of it already existing
 
         Returns
         -------
         bool
             Success
         """
-        if remove_native:
-            if name in self.ace.commands:
-                del self.ace.commands[name]
-                return True
-            else:
-                return False
+        if remove_native and name in self.ace.commands:
+            self.commands[name] = self.ace.disabledCmd
+            return True
         else:
-            if name not in self.commands and name not in self.ace.commands:
+            if name not in self.commands:
                 return False
             if name in self.commands:
                 del self.commands[name]
-            if name in self.ace.commands:
-                del self.ace.commands[name]
             return True
+        return False
 
     def clear_commands(self) -> bool:
         """Clear all the commands registered by this extension
@@ -318,11 +308,7 @@ class AdminCommandExtension():
         bool
             Success
         """
-        for cmdname in self.commands:
-            if cmdname in self.ace.commands:
-                del self.ace.commands[cmdname]
-        else:
-            return False
+        self.commands.clear()
         return True
 
     def msg(self, msg: str):
@@ -351,9 +337,9 @@ class AdminCommandExecutor():
     -------
     AdminCommandExecutor.stuff : dict
         Arbitrary data storage. Can be used to share data between extensions
-    AdminCommandExecutor.commands : dict
-        dictionary of a commands
-            {"name": AdminCommand}
+    AdminCommandExecutor.commands : collections.ChainMap
+        dictionary of a commands and its overrides (extension commands)
+            {"name": AdminCommand}, {"extensioncmd": AdminCommand}, ....
     AdminCommandExecutor.lang : dict
         dictionary of formattable strings
         {
@@ -386,6 +372,9 @@ class AdminCommandExecutor():
         AsyncRawInput class for reading user input in raw tty mode
     self.ainput.ctrl_c = self.full_cleanup
         Async function for handling Ctrl + C
+    self.disabledCmd : AdminCommand
+        AdminCommand that alerts the user that this command is disabled by the system
+        Used by AdminCommandExtension.remove_command(name)
     self.prompt_format = {'bold': True, 'fgcolor': colors.GREEN}
         Formatting of the prompt header and arrow.
     self.input_format = {'fgcolor': 10}
@@ -415,7 +404,7 @@ class AdminCommandExecutor():
         """
         self.stuff = stuff
         self.use_config = use_config
-        self.commands: Dict[str, AdminCommand] = {}
+        self.commands: Union[Dict[str, AdminCommand], ChainMap] = ChainMap()
         self.lang: Dict[str, str] = {
             'nocmd': '%s: unknown command',
             'usage': 'Usage: %s',
@@ -452,6 +441,11 @@ class AdminCommandExecutor():
         self.tab_complete_lastinp = ''
         self.tab_complete_tuple: Sequence[str] = tuple()
         self.tab_complete_id = 0
+
+        async def disabledCmd(cmd: AdminCommandExecutor, *args):
+            cmd.error("This command is disabled by system")
+
+        self.disabledCmd = AdminCommand(disabledCmd, 'disabled', tuple(), tuple())
         if use_config:
             self.load_config()
 
@@ -604,6 +598,7 @@ class AdminCommandExecutor():
             self.info('Loading extension %s' % name)
             await module.extension_init(extension)
             self.extensions[name] = extension
+            self.commands.maps.insert(0, extension.commands)
             return True
         except BaseException:
             self.error("Failed to load extension %s:\n%s" % (name, traceback.format_exc()))
@@ -616,6 +611,7 @@ class AdminCommandExecutor():
         name : str
             The name of an extension
         keep_dict : bool
+            DEPRECATED: ignored in version 1.1.0
             Whether or not this extension should be kept in the list. Defaults to False
 
         Returns
@@ -629,10 +625,11 @@ class AdminCommandExecutor():
             self.extensions[name].tasks[task].cancel()
         try:
             extension = self.extensions[name]
-            extension.clear_commands()
             if not keep_dict:
-                del self.extensions[name]
+                warnings.warn("keep_dict is ignored in version 1.1.0", DeprecationWarning)
+            del self.extensions[name]
             await extension.module.extension_cleanup(extension)
+            self.commands.maps.remove(extension.commands)
             return True
         except Exception:
             self.error("Failed to call cleanup in %s:\n%s" % (name, traceback.format_exc()))
@@ -740,7 +737,10 @@ class AdminCommandExecutor():
         if cmdname not in self.commands:
             self.print(self.lang['nocmd'] % cmdname)
             return
-        cmd: AdminCommand = self.commands[cmdname]
+        cmd: Union[AdminCommand, None] = self.commands[cmdname]
+        if cmd is None or cmd is self.disabledCmd:
+            self.print(self.lang['nocmd'] % cmdname)
+            return
         try:
             args, argl = self.parse_args(argl, cmd.args, cmd.optargs)
             if argl:
@@ -832,7 +832,7 @@ class AdminCommandExecutor():
                 # generate list of command suggestions
                 self.tab_complete_tuple = []
                 for cmdname in self.commands:
-                    if cmdname.startswith(inp):
+                    if cmdname.startswith(inp) and self.commands[cmdname] is not self.disabledCmd:
                         self.tab_complete_tuple.append(cmdname)
                 self.tab_complete_id = 0
                 self.ainput.writeln('\t'.join(self.tab_complete_tuple), fgcolor=colors.GREEN)
@@ -841,6 +841,8 @@ class AdminCommandExecutor():
                 if cmdname not in self.commands:
                     return
                 cmd: AdminCommand = self.commands[cmdname]
+                if cmd is self.disabledCmd:
+                    return
                 try:
                     args, argl = self.parse_args(argl, cmd.args, cmd.optargs, raise_exc=False)
                     if argl:
@@ -972,6 +974,8 @@ class AdminCommandEWrapper(AdminCommandExecutor):
 
 
 def basic_command_set(ACE: AdminCommandExecutor):
+    commands_ = ACE.commands.maps[0]
+
     async def exitquit(self: AdminCommandExecutor):
         self.print("Command prompt is closing")
         self.prompt_dispatching = False
@@ -979,7 +983,7 @@ def basic_command_set(ACE: AdminCommandExecutor):
             await self.full_cleanup()
         except Exception:
             self.print(traceback.format_exc())
-    ACE.commands['exit'] = ACE.commands['quit'] = \
+    commands_['exit'] = commands_['quit'] = \
         AdminCommand(exitquit, 'exit', [], [], 'Exit from command prompt and gracefully shutdown')
 
     async def help_(self: AdminCommandExecutor, cpage: int = 1):
@@ -993,7 +997,7 @@ def basic_command_set(ACE: AdminCommandExecutor):
             usagedesc.append('| %s -> %s' % (self.usage(cmdname, False), cmd.description))
         maxpage, list_ = paginate_list(usagedesc, 6, cpage)
         self.print(('Help (page %s out of %s)\n' % (cpage, maxpage)) + '\n'.join(list_))
-    ACE.commands['help'] = ACE.commands['?'] = \
+    commands_['help'] = commands_['?'] = \
         AdminCommand(help_, 'help', [], [(int, 'page')], 'Show all commands')
 
     async def extlist(self: AdminCommandExecutor, cpage: int = 1):
@@ -1001,11 +1005,11 @@ def basic_command_set(ACE: AdminCommandExecutor):
         maxpage, pgls = paginate_list(ls, 7, cpage)
         cpage = max(min(maxpage, cpage), 1)
         self.print('Extensions (page %s of %s): %s' % (cpage, maxpage, '\n'.join(pgls)))
-    ACE.commands['extlist'] = \
-        ACE.commands['extls'] = \
-        ACE.commands['lsext'] = \
-        ACE.commands['exts'] = \
-        ACE.commands['extensions'] = \
+    commands_['extlist'] = \
+        commands_['extls'] = \
+        commands_['lsext'] = \
+        commands_['exts'] = \
+        commands_['extensions'] = \
         AdminCommand(extlist, 'extlist', [], [(int, 'page')], 'List loaded extensions')
 
     async def extload(self: AdminCommandExecutor, name: str):
@@ -1014,9 +1018,9 @@ def basic_command_set(ACE: AdminCommandExecutor):
             return
         else:
             self.print("%s loaded." % name)
-    ACE.commands['extload'] = \
-        ACE.commands['extensionload'] = \
-        ACE.commands['loadextension'] = \
+    commands_['extload'] = \
+        commands_['extensionload'] = \
+        commands_['loadextension'] = \
         AdminCommand(extload, 'extload', [(None, 'filename (without .py)')], [], 'Load an extension (from extensions directory)')
 
     async def extunload(self: AdminCommandExecutor, name: str):
@@ -1035,12 +1039,12 @@ def basic_command_set(ACE: AdminCommandExecutor):
             if extname.startswith(name):
                 res.append(extname)
         return res
-    ACE.commands['extunload'] = \
-        ACE.commands['unloadext'] = \
-        ACE.commands['extremove'] = \
-        ACE.commands['removeext'] = \
-        ACE.commands['extensionremove'] = \
-        ACE.commands['removeextension'] = \
+    commands_['extunload'] = \
+        commands_['unloadext'] = \
+        commands_['extremove'] = \
+        commands_['removeext'] = \
+        commands_['extensionremove'] = \
+        commands_['removeextension'] = \
         AdminCommand(extunload, 'extunload', [(None, 'name (without .py)')], [], 'Unload an extension', extunload_tab)
 
     async def extreload(self: AdminCommandExecutor, name: str):
@@ -1056,25 +1060,25 @@ def basic_command_set(ACE: AdminCommandExecutor):
                 return
             else:
                 self.print("%s loaded." % name)
-    ACE.commands['extreload'] = \
-        ACE.commands['reloadext'] = \
-        ACE.commands['extrestart'] = \
-        ACE.commands['reloadextension'] = \
-        ACE.commands['extensionreload'] = \
-        ACE.commands['restartextension'] = \
-        ACE.commands['extensionrestart'] = \
-        ACE.commands['relext'] = \
-        ACE.commands['extrel'] = \
+    commands_['extreload'] = \
+        commands_['reloadext'] = \
+        commands_['extrestart'] = \
+        commands_['reloadextension'] = \
+        commands_['extensionreload'] = \
+        commands_['restartextension'] = \
+        commands_['extensionrestart'] = \
+        commands_['relext'] = \
+        commands_['extrel'] = \
         AdminCommand(extreload, 'extreload', [(None, 'name (without .py)')], [], 'Reload an extension', extunload_tab)
 
     async def date(self: AdminCommandExecutor):
         date = datetime.datetime.now()
         self.print("It's %s.%s.%s-%s:%s:%s right now" % (date.day, date.month, date.year, date.hour, date.minute, date.second))
-    ACE.commands['date'] = AdminCommand(date, 'date', [], [], 'Show current date')
+    commands_['date'] = AdminCommand(date, 'date', [], [], 'Show current date')
 
     async def error(self: AdminCommandExecutor):
         self.error("Stderr!")
-    ACE.commands['error'] = AdminCommand(error, 'error', [], [], 'Test error')
+    commands_['error'] = AdminCommand(error, 'error', [], [], 'Test error')
 
     async def testoptargs(self: AdminCommandExecutor, mand1: str, opt1: int = 0, opt2: str = '', opt3: int = 0):
         self.print(mand1, opt1, opt2, opt3)
@@ -1084,16 +1088,19 @@ def basic_command_set(ACE: AdminCommandExecutor):
             return "example", "another", "main", "obsolete"
         elif len(args) == 2:
             return "optional", "not", "needed"
-    ACE.commands['testoptargs'] = AdminCommand(testoptargs, 'testoptargs', [(str, 'mandatory')], ((int, 'opt1'), (str, 'opt2'), (int, 'opt3')))
+    commands_['testoptargs'] = AdminCommand(testoptargs, 'testoptargs', [(str, 'mandatory')], ((int, 'opt1'), (str, 'opt2'), (int, 'opt3')))
+
+    if ACE.extensions:
+        warnings.warn("basic_command_set() should be initialized before loading extensions", RuntimeWarning)
 
 
 async def main():
     # scoped functions
 
     ACE = AdminCommandExecutor(None, use_config=False)
-    await ACE.load_extensions()
     ACE.print("Plain command line")
     basic_command_set(ACE)
+    await ACE.load_extensions()
     await ACE.prompt_loop()
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
