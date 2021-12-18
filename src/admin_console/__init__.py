@@ -505,7 +505,11 @@ class AdminCommandExecutor():
         extlist = []
         if os.path.exists(os.path.join(self.extpath, 'extdep.txt')):
             with open(os.path.join(self.extpath, 'extdep.txt'), 'r') as f:
-                extlist.extend('%s.py' % x.strip() for x in f.readlines())
+                for x in f.readlines():
+                    # Light vulnerability fix: path traversal
+                    if '../' in x or x.startswith('/'):
+                        continue
+                    extlist.append('%s.py' % x.strip())
         else:
             self.print('Note: create extdep.txt in the extensions folder to sequentally load modules')
         if not os.path.exists(self.extpath):
@@ -587,7 +591,12 @@ class AdminCommandExecutor():
         if name in self.extensions:
             self.error("Failed to load extension %s: This extension is already loaded." % name)
             return False
-        spec = importlib.util.spec_from_file_location(name, os.path.join(self.extpath, name + '.py'))
+        _path = os.path.join(self.extpath, name + '.py')
+        # Light vulnerability fix: path traversal
+        if '../' in _path or _path.startswith('/'):
+            self.error("Failed to load extension %s: path should not be absolute or contain \"..\"" % name)
+            return False
+        spec = importlib.util.spec_from_file_location(name, _path)
         module = importlib.util.module_from_spec(spec)
         try:
             spec.loader.exec_module(module)
