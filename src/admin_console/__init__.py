@@ -826,6 +826,8 @@ class AdminCommandExecutor():
         self.ainput.is_reading = False
         for func in self.full_cleanup_steps:
             await func(self)
+        for extension in tuple(self.extensions.keys()):
+            await self.unload_extension(extension)
 
     async def _tab_complete(self):
         """This is callback function for TAB key event
