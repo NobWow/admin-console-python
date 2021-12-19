@@ -8,7 +8,7 @@ import asyncio
 import os
 import sys
 from enum import Enum
-from typing import Union
+from typing import Union, Sequence, Tuple, MutableSequence, Optional
 import traceback
 
 # raw mode features
@@ -182,9 +182,9 @@ class AsyncRawInput():
         self.is_reading = False
         self.stdin = stdin
         self.stdout = stdout
-        self.read_lastinp: list = []  # mutability but extra memory consumption
+        self.read_lastinp: MutableSequence[str] = []  # mutability but extra memory consumption
         self.read_lastprompt = ''
-        self.old_tcattrs: list = None
+        self.old_tcattrs: MutableSequence[int] = None
         self.prepared = False
         self.history = history
         self.history_limit = history_limit
@@ -192,8 +192,9 @@ class AsyncRawInput():
         self.echo = True
         self.ctrl_c = None
         self.keystrokes = {}
-        self.prompt_formats = ('', '')
-        self.input_formats = ('', '')
+        self.prompt_formats: Sequence[Tuple[str, str]] = ('', '')
+        self.input_formats: Sequence[Tuple[str, str]] = ('', '')
+        self._prompting_task: Optional[asyncio.Task]
 
     def __del__(self):
         self.end()
@@ -337,6 +338,9 @@ class AsyncRawInput():
             self.input_formats = format_term(**input_formats)
         """
         try:
+            if self._prompting_task is not None and not self._prompting_task.done():
+                self._prompting_task.cancel()
+            self._prompting_task = asyncio.current_task()
             self.is_reading = True
             if self.read_lastinp is None:
                 self.read_lastinp = []
@@ -493,6 +497,9 @@ class AsyncRawInput():
         self.input_formats = ('', '')
         self.prompt_formats = ('', '')
         try:
+            if self._prompting_task is not None and not self._prompting_task.done():
+                self._prompting_task.cancel()
+            self._prompting_task = asyncio.current_task()
             char = []
             event = asyncio.Event()
             self.read_lastprompt = prompt
@@ -518,15 +525,14 @@ class AsyncRawInput():
             self.is_reading = True
             self.loop.add_reader(self.stdin.fileno(), char_reader)
             await event.wait()
-            self.loop.remove_reader(self.stdin.fileno())
-            self.is_reading = False
             result = ''.join(char)
-            self.stdout.write(''.join(result) + '\r\n')
+            self.stdout.write(''.join(result))
             return result
-        except BaseException as exc:
+        finally:
             self.is_reading = False
             self.loop.remove_reader(self.stdin.fileno())
-            raise exc
+            self.stdout.write('\r\n')
+            self.stdout.flush()
         self.input_formats = backup_inputformats
         self.prompt_formats = backup_promptformats
 
