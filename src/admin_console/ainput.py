@@ -461,9 +461,6 @@ class AsyncRawInput():
                         self.stdout.write(''.join(key))
                 self.stdout.flush()
             # remove input format
-            self.stdout.write(self.input_formats[1] + '\r\n')
-            self.stdout.flush()
-            self.is_reading = False
             result = ''.join(self.read_lastinp)
             if self.history is not None and not history_disabled:
                 if not len(self.history):
@@ -474,12 +471,11 @@ class AsyncRawInput():
                         self.history.pop(0)
             self.read_lastinp.clear()
             return result
-        except BaseException as exc:
-            self.is_reading = False
+        finally:
             self.loop.remove_reader(self.stdin.fileno())
-            self.stdout.write(self.input_formats[1])
+            self.stdout.write(self.input_formats[1] + '\r\n')
             self.stdout.flush()
-            raise exc
+            self.is_reading = False
 
     async def prompt_keystroke(self, prompt=': ', echo=True):
         """
