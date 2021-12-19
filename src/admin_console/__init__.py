@@ -30,7 +30,7 @@ import logging
 import re
 import warnings
 from math import ceil
-from typing import Union, Sequence, Tuple, Mapping, Awaitable, Dict, List, Set, Optional
+from typing import Union, Sequence, Tuple, Mapping, MutableMapping, Awaitable, Dict, List, Set, Optional
 from collections import ChainMap
 
 
@@ -226,11 +226,11 @@ class AdminCommandExtension():
             logging.Logger instance attached to an extension
         """
         self.ace = ACE
-        self.tasks = {
+        self.tasks: MutableMapping[str, asyncio.Task] = {
             # 'task_name': asyncio.Task
         }
         self.module = module
-        self.commands = {
+        self.commands: MutableMapping[str, AdminCommand] = {
             # 'cmdname': AdminCommand()
         }
         self.data = {}
