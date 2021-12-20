@@ -194,7 +194,7 @@ class AsyncRawInput():
         self.keystrokes = {}
         self.prompt_formats: Sequence[Tuple[str, str]] = ('', '')
         self.input_formats: Sequence[Tuple[str, str]] = ('', '')
-        self._prompting_task: Optional[asyncio.Task]
+        self._prompting_task: Optional[asyncio.Task] = None
 
     def __del__(self):
         self.end()
