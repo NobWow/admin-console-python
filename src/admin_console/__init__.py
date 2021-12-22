@@ -317,7 +317,7 @@ class AdminCommandExtension():
 
     def logmsg(self, msg: str, level: int = logging.INFO):
         """Write a message into the log"""
-        self.logger.log(1, '[%s] %s' % (self.name, msg))
+        self.logger.log(level, '[%s] %s' % (self.name, msg))
 
 
 class AdminCommandExecutor():

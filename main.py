@@ -1,6 +1,8 @@
 import asyncio
 import sys
+import logging
 from src.admin_console import AdminCommandExecutor, basic_command_set, colors
+from src.admin_console.ainput import ARILogHandler
 
 
 async def main(args):
@@ -8,7 +10,12 @@ async def main(args):
         extpath = args[0]
     else:
         extpath = 'extensions/'
-    console = AdminCommandExecutor(use_config=False)
+    logger = logging.getLogger('main')
+    logger.setLevel(logging.DEBUG)
+    console = AdminCommandExecutor(use_config=False, logger=logger)
+    _handler = ARILogHandler(console.ainput, level=logging.DEBUG)
+    logger.addHandler(_handler)
+    _handler.setFormatter(logging.Formatter('-> [%(levelname)s] %(message)s'))
     basic_command_set(console)
     if extpath != "no":
         await console.load_extensions()
