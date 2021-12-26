@@ -23,8 +23,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-Note: create extdep.txt in the extensions folder to sequentally load modules
-Tutorial! -> 
+# Note: create extdep.txt in the extensions folder to sequentally load modules
+# Tutorial! -> 
 ```
 ## Event handling
 Example of how to handle command dispatching and how to cancel some commands
