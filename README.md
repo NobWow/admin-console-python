@@ -15,8 +15,8 @@ async def main():
     # Custom prompt formatting
     console.promptheader = "Tutorial! "
     console.promptarrow = "->"
-    console.prompt_formats['bold'] = True
-    console.prompt_formats['fgcolor'] = colors.GREEN
+    console.prompt_format['bold'] = True
+    console.prompt_format['fgcolor'] = colors.GREEN
     await console.load_extensions()  # will create an "extensions/" in the working directory
     await console.prompt_loop()  # blocks until > exit is invoked
 
