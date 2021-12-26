@@ -5,6 +5,15 @@ from src.admin_console import AdminCommandExecutor, basic_command_set, colors
 from src.admin_console.ainput import ARILogHandler
 
 
+async def list_asyncio_tasks(console: AdminCommandExecutor):
+    while True:
+        console.ainput.writeln('-------------------', fgcolor=9)
+        for task in asyncio.all_tasks():
+            console.print("Task pending: %s" % task)
+        console.ainput.writeln('-------------------', fgcolor=9)
+        await asyncio.sleep(5)
+
+
 async def main(args):
     if len(args) > 0:
         extpath = args[0]

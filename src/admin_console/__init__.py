@@ -30,8 +30,9 @@ import logging
 import re
 import warnings
 from math import ceil
-from typing import Union, Sequence, Tuple, Mapping, MutableMapping, Awaitable, Dict, List, Set, Optional
-from collections import ChainMap
+from typing import Union, Sequence, Tuple, Mapping, MutableMapping, Awaitable, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
+from collections import ChainMap, defaultdict
+from aiohndchain import AIOHandlerChain
 
 
 ArgumentType = Union[str, int, float, bool, None]
@@ -51,16 +52,6 @@ single_char_escaper = {
     "v": "\v",
     " ": " "
 }
-
-
-def str_findall_unescaped(str_: str, char: int):
-    list_ = []
-    _next_pos = -1
-    for i in range(str_.count(chr(char))):
-        _next_pos = str_.find(chr(char), _next_pos + 1)
-        if str_[_next_pos - 1] != chr(92):
-            list_.append(_next_pos)
-    return list_
 
 
 class InvalidArgument(Exception):
@@ -151,6 +142,7 @@ class AdminCommand():
     """Represents a console command.
     To add a command of an extension, use AdminCommandExtension.add_command(
         afunc, name, args, optargs, description) instead
+    Emits AdminCommandExecutor.cmdexec_event, AdminCommandExecutor.cmdtab_event
     """
     def __init__(self, afunc, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]], description: str = '', atabcomplete: Optional[Awaitable[Sequence[str]]] = None):
         """
@@ -196,12 +188,28 @@ class AdminCommand():
 
     async def execute(self, executor, args: Sequence[object]):
         """Shouldn't be overriden, use afunc to assign a functor to the command"""
-        await self.afunc(executor, *args)
+        async with executor.cmdexec_event.emit_and_handle(self, executor, args) as handle:
+            try:
+                if handle()[0] is not False:
+                    await self.afunc(executor, *args)
+                if not executor.prompt_dispatching:
+                    return
+            except Exception:
+                handle(False)
+                raise
 
     async def tab_complete(self, executor, args: Sequence[object]) -> Union[tuple, None]:
         """Shouldn't be overriden, use atabcomplete to assign a tab complete handler"""
-        if self.atabcomplete:
-            return await self.atabcomplete(executor, *args)
+        async with executor.cmdtab_event.emit_and_handle(self, executor, args) as handle:
+            try:
+                _res, _args, _kwargs = handle()
+                if 'override' in _kwargs:
+                    return _kwargs['override']
+                elif _res:
+                    return await self.atabcomplete(executor, *args)
+            except Exception:
+                handle(False)
+                raise
 
 
 class AdminCommandExtension():
@@ -253,10 +261,15 @@ class AdminCommandExtension():
         """
         return False
 
-    def add_command(self, afunc: Awaitable, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]] = [], description: str = '', replace=False) -> bool:
+    def add_command(self, afunc: Callable[Any, Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[ArgumentType, str]] = tuple(), optargs: Sequence[Tuple[ArgumentType, str]] = tuple(), description: str = '', replace=False) -> bool:
         """Registers a command and adds it to the AdminCommandExecutor.
         Constructs an AdminCommand instance with all the arguments passed.
         Doesn't require sync_local_commands() to be run
+
+        Note
+        ----
+        This function will be transformed into an async function in the future versions
+
         Parameters
         ----------
         see AdminCommand
@@ -268,6 +281,7 @@ class AdminCommandExtension():
         bool
             Success
         """
+        asyncio.create_task(self.ace.cmdadd_event(name, args, optargs, description))
         cmd = AdminCommand(afunc, name, args, optargs, description)
         if name not in self.ace.commands or (name in self.ace.commands and replace):
             self.commands[name] = cmd
@@ -289,6 +303,7 @@ class AdminCommandExtension():
         bool
             Success
         """
+        asyncio.create_task(self.ace.cmdrm_event(name))
         if remove_native and name in self.ace.commands:
             self.commands[name] = self.ace.disabledCmd
             return True
@@ -385,11 +400,36 @@ class AdminCommandExecutor():
         Contains last argument suggestions on tab complete call
     self.tab_complete_id = 0
         Contains currently cycled element ID in self.tab_complete_tuple
+
+    Events
+    self.events : collections.defaultdict(AIOHandlerChain)
+        Main pool of events. Can be used to store custom events.
+    self.cmdexec_event : AIOHandlerChain
+        Arguments: (cmd: AdminCommand, executor: Union[AdminCommandExecutor, AdminCommandEWrapper], args: Sequence[Any])
+        Emits when a command is executed through specific executor and with parsed arguments. Cancellable.
+    self.cmdtab_event : AIOHandlerChain
+        Arguments: (cmd: AdminCommand, executor: Union[AdminCommandExecutor, AdminCommandEWrapper], args: Sequence[Any])
+        Keyword arguments are received from handlers: {'override': Sequence[str]}
+        Emits when TAB key is pressed with this command. Arguments are parsed until the text cursor.
+        Cancellable. Set 'override' in keyword argument dictionary to explicitly set the list of suggested strings.
+    self.cmdadd_event : AIOHandlerChain
+        Arguments: (name: str, args: Sequence[(Type, name)], optargs: Sequence[(Type, name)], description: str)
+        Emits when an extension adds the command or self.add_command is called. Emits asynchronously since AdminCommandExtension.add_command is not async. Not cancellable.
+    self.cmdrm_event : AIOHandlerChain
+        Arguments: (name: str)
+        Emits when an extension removes the command or self.remove_command is called. Emits asynchronously since AdminCommandExtension.remove_command is not async. Not cancellable.
+    self.extload_event : AIOHandlerChain
+        Arguments: (name: str)
+        Emits when an extension is loading. Cancellable.
+    self.extunload_event : AIOHandlerChain
+        Arguments: (name: str)
+        Emits when an extension is unloading. Cancellable.
+
     Others:
     self.print = self.ainput.writeln
     self.logger = logger
     """
-    def __init__(self, stuff: Mapping = {}, use_config=True, logger: logging.Logger = None, extension_path='extensions/'):
+    def __init__(self, stuff: Optional[Mapping] = None, use_config=True, logger: logging.Logger = None, extension_path='extensions/'):
         """
         Parameters
         ----------
@@ -402,6 +442,8 @@ class AdminCommandExecutor():
         extension_path : str
             Relative or absolute path to the extensions directory. Defaults to "extensions/"
         """
+        if stuff is None:
+            stuff = {}
         self.stuff = stuff
         self.use_config = use_config
         self.commands: Union[Dict[str, AdminCommand], ChainMap] = ChainMap()
@@ -441,6 +483,14 @@ class AdminCommandExecutor():
         self.tab_complete_lastinp = ''
         self.tab_complete_tuple: Sequence[str] = tuple()
         self.tab_complete_id = 0
+        # events
+        self.events = defaultdict(lambda: AIOHandlerChain())
+        self.events['cmdadd_event'] = self.cmdadd_event = AIOHandlerChain(cancellable=False)
+        self.events['cmdrm_event'] = self.cmdrm_event = AIOHandlerChain(cancellable=False)
+        self.events['cmdexec_event'] = self.cmdexec_event = AIOHandlerChain()
+        self.events['cmdtab_event'] = self.cmdtab_event = AIOHandlerChain()
+        self.events['extload_event'] = self.extload_event = AIOHandlerChain()
+        self.events['extunload_event'] = self.extunload_event = AIOHandlerChain()
 
         async def disabledCmd(cmd: AdminCommandExecutor, *args):
             cmd.error("This command is disabled by system")
@@ -448,6 +498,56 @@ class AdminCommandExecutor():
         self.disabledCmd = AdminCommand(disabledCmd, 'disabled', tuple(), tuple())
         if use_config:
             self.load_config()
+
+    def add_command(self, afunc: Callable[Any, Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[Type, str]] = tuple(), optargs: Sequence[Tuple[Type, str]] = tuple(), description: str = '', atabcomplete: Optional[Callable[Any, Coroutine[Any, Any, Any]]] = None) -> bool:
+        """
+        Constructs an AdminCommand instance with all the arguments passed.
+        Adds the command to the first layer of the chainmap
+        Emits cmdadd_event asynchronously.
+
+        Note
+        ----
+        This function will be transformed into an async function in the future versions
+
+        Parameters
+        ----------
+        see AdminCommand
+
+        Returns
+        -------
+        bool
+            Success
+        """
+        if name in self.commands:
+            return False
+        asyncio.create_task(self.cmdadd_event(name, args, optargs, description))
+        self.commands.maps[0][name] = AdminCommand(afunc, name, args, optargs, description, atabcomplete)
+        return True
+
+    def remove_command(self, name: str):
+        """
+        Permanently removes the command from the chainmap.
+        Emits cmdrm_event asynchronously.
+
+        Note
+        ----
+        This function will be transformed into an async function in the future versions
+
+        Parameters
+        ----------
+        name : str
+            name of the command
+
+        Returns
+        -------
+        bool
+            Success
+        """
+        if name not in self.commands:
+            return False
+        asyncio.create_task(self.cmdrm_event(name))
+        del self.commands[name]
+        return True
 
     def print(self, *value, sep=' ', end='\n'):
         """Prints a message in the console, preserving the prompt and user input, if any
@@ -577,6 +677,7 @@ class AdminCommandExecutor():
 
     async def load_extension(self, name: str) -> bool:
         """Loads a Python script as an extension from its extension path and call await extension_init(AdminCommandExtension)
+        Emits extload_event.
 
         Parameters
         ----------
@@ -588,33 +689,38 @@ class AdminCommandExecutor():
         bool
             Success
         """
-        if name in self.extensions:
-            self.error("Failed to load extension %s: This extension is already loaded." % name)
-            return False
-        _path = os.path.join(self.extpath, name + '.py')
-        # Light vulnerability fix: path traversal
-        if '../' in _path or _path.startswith('/'):
-            self.error("Failed to load extension %s: path should not be absolute or contain \"..\"" % name)
-            return False
-        spec = importlib.util.spec_from_file_location(name, _path)
-        module = importlib.util.module_from_spec(spec)
-        try:
-            spec.loader.exec_module(module)
-            if 'extension_init' not in module.__dict__ or 'extension_cleanup' not in module.__dict__:
-                self.error("Cannot load %s: missing extension_init or extension_cleanup" % name)
-                return
-            extension = AdminCommandExtension(self, name, module, logger=self.logger)
-            self.info('Loading extension %s' % name)
-            await module.extension_init(extension)
-            self.extensions[name] = extension
-            self.commands.maps.insert(0, extension.commands)
-            return True
-        except BaseException:
-            self.error("Failed to load extension %s:\n%s" % (name, traceback.format_exc()))
-            return False
+        async with self.extload_event.emit_and_handle(name, before=False) as handle:
+            if not handle()[0]:
+                return False
+            if name in self.extensions:
+                self.error("Failed to load extension %s: This extension is already loaded." % name)
+                return False
+            _path = os.path.join(self.extpath, name + '.py')
+            # Light vulnerability fix: path traversal
+            if '../' in _path or _path.startswith('/'):
+                self.error("Failed to load extension %s: path should not be absolute or contain \"..\"" % name)
+                return False
+            spec = importlib.util.spec_from_file_location(name, _path)
+            module = importlib.util.module_from_spec(spec)
+            try:
+                spec.loader.exec_module(module)
+                if 'extension_init' not in module.__dict__ or 'extension_cleanup' not in module.__dict__:
+                    self.error("Cannot load %s: missing extension_init or extension_cleanup" % name)
+                    return
+                extension = AdminCommandExtension(self, name, module, logger=self.logger)
+                self.info('Loading extension %s' % name)
+                await module.extension_init(extension)
+                self.extensions[name] = extension
+                self.commands.maps.insert(0, extension.commands)
+                return True
+            except BaseException:
+                self.error("Failed to load extension %s:\n%s" % (name, traceback.format_exc()))
+                return False
 
     async def unload_extension(self, name: str, keep_dict=False) -> bool:
         """Unload an extension and call await extension_cleanup(AdminCommandExtension)
+        Emits extunload_event.
+
         Parameters
         ----------
         name : str
@@ -628,21 +734,27 @@ class AdminCommandExecutor():
         bool
             Success
         """
-        if name not in self.extensions:
-            return None
-        for task in self.extensions[name].tasks:
-            self.extensions[name].tasks[task].cancel()
-        try:
-            extension = self.extensions[name]
-            if not keep_dict:
-                warnings.warn("keep_dict is ignored in version 1.1.0", DeprecationWarning)
-            del self.extensions[name]
-            await extension.module.extension_cleanup(extension)
-            self.commands.maps.remove(extension.commands)
-            return True
-        except Exception:
-            self.error("Failed to call cleanup in %s:\n%s" % (name, traceback.format_exc()))
-            return False
+        assert self.extunload_event._lock != self.cmdexec_event._lock
+        async with self.extunload_event.emit_and_handle(name, before=False) as handle:
+            if not handle()[0]:
+                return False
+            if name not in self.extensions:
+                handle(False)
+                return None
+            for task in self.extensions[name].tasks:
+                self.extensions[name].tasks[task].cancel()
+            try:
+                extension = self.extensions[name]
+                if not keep_dict:
+                    warnings.warn("keep_dict is ignored in version 1.1.0", DeprecationWarning)
+                del self.extensions[name]
+                await extension.module.extension_cleanup(extension)
+                self.commands.maps.remove(extension.commands)
+                return True
+            except Exception:
+                self.error("Failed to call cleanup in %s:\n%s" % (name, traceback.format_exc()))
+                handle(False)
+                return False
 
     def parse_args(self, argl: str, argtypes: Sequence[Tuple[ArgumentType, str]] = None, opt_argtypes: Sequence[Tuple[ArgumentType, str]] = None, *, raise_exc=True) -> (list, str):
         """
@@ -937,7 +1049,7 @@ class FakeAsyncRawInput():
         # it's a dummy function here
         pass
 
-    def prompt_line(self, prompt="", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
+    def prompt_line(self, prompt="", echo=True, history_disabled=False, prompt_formats: Optional[MutableMapping] = None, input_formats: Optional[MutableMapping] = None):
         """Ask a user for input"""
         raise NotImplementedError
 
