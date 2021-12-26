@@ -1128,7 +1128,7 @@ def basic_command_set(ACE: AdminCommandExecutor):
         ls = list(self.extensions.keys())
         maxpage, pgls = paginate_list(ls, 7, cpage)
         cpage = max(min(maxpage, cpage), 1)
-        self.print('Extensions (page %s of %s): %s' % (cpage, maxpage, '\n'.join(pgls)))
+        self.print('Extensions (page %s of %s):\n%s' % (cpage, maxpage, '\n'.join(pgls)))
     commands_['extlist'] = \
         commands_['extls'] = \
         commands_['lsext'] = \
@@ -1212,7 +1212,7 @@ def basic_command_set(ACE: AdminCommandExecutor):
             return "example", "another", "main", "obsolete"
         elif len(args) == 2:
             return "optional", "not", "needed"
-    commands_['testoptargs'] = AdminCommand(testoptargs, 'testoptargs', [(str, 'mandatory')], ((int, 'opt1'), (str, 'opt2'), (int, 'opt3')))
+    commands_['testoptargs'] = AdminCommand(testoptargs, 'testoptargs', [(str, 'mandatory')], ((int, 'opt1'), (str, 'opt2'), (int, 'opt3')), 'See how argument parsing and tabcomplete works', testoptargs_tab)
 
     if ACE.extensions:
         warnings.warn("basic_command_set() should be initialized before loading extensions", RuntimeWarning)
