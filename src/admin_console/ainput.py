@@ -339,7 +339,7 @@ class AsyncRawInput():
         """
         try:
             _task = asyncio.current_task()
-            if self._prompting_task is not None and not self._prompting_task.done() and self._prompting_task is not _task:
+            if self._prompting_task is not None and not self._prompting_task.done() and self._prompting_task is not _task and self.is_reading:
                 self._prompting_task.cancel()
             self._prompting_task = _task
             self.is_reading = True
@@ -499,7 +499,7 @@ class AsyncRawInput():
         self.prompt_formats = ('', '')
         try:
             _task = asyncio.current_task()
-            if self._prompting_task is not None and not self._prompting_task.done() and not self._prompting_task is _task:
+            if self._prompting_task is not None and not self._prompting_task.done() and not self._prompting_task is _task and self.is_reading:
                 self._prompting_task.cancel()
             self._prompting_task = _task
             char = []
