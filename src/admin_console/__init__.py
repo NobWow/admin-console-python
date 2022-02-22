@@ -262,7 +262,7 @@ class AdminCommandExtension():
         """
         return False
 
-    def add_command(self, afunc: Callable[Any, Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[ArgumentType, str]] = tuple(), optargs: Sequence[Tuple[ArgumentType, str]] = tuple(), description: str = '', replace=False) -> bool:
+    def add_command(self, afunc: Callable[[Any], Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[ArgumentType, str]] = tuple(), optargs: Sequence[Tuple[ArgumentType, str]] = tuple(), description: str = '', replace=False) -> bool:
         """Registers a command and adds it to the AdminCommandExecutor.
         Constructs an AdminCommand instance with all the arguments passed.
         Doesn't require sync_local_commands() to be run
@@ -500,7 +500,7 @@ class AdminCommandExecutor():
         if use_config:
             self.load_config()
 
-    def add_command(self, afunc: Callable[Any, Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[Type, str]] = tuple(), optargs: Sequence[Tuple[Type, str]] = tuple(), description: str = '', atabcomplete: Optional[Callable[Any, Coroutine[Any, Any, Any]]] = None) -> bool:
+    def add_command(self, afunc: Callable[[Any], Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[Type, str]] = tuple(), optargs: Sequence[Tuple[Type, str]] = tuple(), description: str = '', atabcomplete: Optional[Callable[[Any], Coroutine[Any, Any, Any]]] = None) -> bool:
         """
         Constructs an AdminCommand instance with all the arguments passed.
         Adds the command to the first layer of the chainmap
