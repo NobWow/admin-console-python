@@ -3,6 +3,7 @@ import sys
 import logging
 from src.admin_console import AdminCommandExecutor, basic_command_set, colors
 from src.admin_console.ainput import ARILogHandler
+from collections import defaultdict
 
 
 async def list_asyncio_tasks(console: AdminCommandExecutor):
@@ -21,7 +22,8 @@ async def main(args):
         extpath = 'extensions/'
     logger = logging.getLogger('main')
     logger.setLevel(logging.DEBUG)
-    console = AdminCommandExecutor(use_config=False, logger=logger)
+    console = AdminCommandExecutor(defaultdict(lambda: None), use_config=False, logger=logger)
+    console.config = defaultdict(lambda: None)
     _handler = ARILogHandler(console.ainput, level=logging.DEBUG)
     logger.addHandler(_handler)
     _handler.setFormatter(logging.Formatter('-> [%(levelname)s] %(message)s'))

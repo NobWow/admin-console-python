@@ -308,11 +308,11 @@ class AsyncRawInput():
         Redisplay a user prompt at specified position on current cursor line.
         """
         # move cursor at redrawing part
-        self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + at))
+        self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + max(at, 1)))
         # clear the rest
         self.stdout.write('\33[0K')
         # render part of user input and enable formats
-        self.stdout.write(self.input_formats[0] + ''.join(self.read_lastinp[at - 1:]))
+        self.stdout.write(self.input_formats[0] + ''.join(self.read_lastinp[max(at - 1, 0):]))
         # restore cursor pos
         self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
         self.stdout.flush()
@@ -392,7 +392,7 @@ class AsyncRawInput():
                 if len(key) == 1:
                     if ord(key[0]) == 127 or ord(key[0]) == 8:
                         # do backspace
-                        if self.read_lastinp:
+                        if self.read_lastinp and self.cursor != 0:
                             self.read_lastinp.pop(self.cursor - 1)
                             self.cursor -= 1
                             if echo:
@@ -499,7 +499,7 @@ class AsyncRawInput():
         self.prompt_formats = ('', '')
         try:
             _task = asyncio.current_task()
-            if self._prompting_task is not None and not self._prompting_task.done() and not self._prompting_task is _task and self.is_reading:
+            if self._prompting_task is not None and not self._prompting_task.done() and self._prompting_task is not _task and self.is_reading:
                 self._prompting_task.cancel()
             self._prompting_task = _task
             char = []
