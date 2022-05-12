@@ -1069,32 +1069,25 @@ class AdminCommandEWrapper(AdminCommandExecutor):
     WARNING: this is NOT a sandbox solution for the extensions! This class is used to execute commands in a different way
     """
     def __init__(self, *args, ace: AdminCommandExecutor, **kwargs):
-        def wrap_self(origin):
-            if asyncio.iscoroutinefunction(origin):
-                async def new(self_: AdminCommandExecutor, *args, **kwargs):
-                    # replace original AdminCommandExecutor with ourselves
-                    # (note that self_ is substituted with self)
-                    # so the function runs wrapped
-                    return await origin(self, *args, **kwargs)
-            else:
-                def new(self_: AdminCommandExecutor, *args, **kwargs):
-                    return origin(self, *args, **kwargs)
-            return new
         self.master = ace
-        self.own_data = {}
-        # Copy members here
-        self.__dict__.update(ace.__dict__)
-        # Transform methods of the proxy into proxy-methods
-        for name in dir(ace):
-            # ignore meta and already copied members
-            if name.startswith('__') or name in ace.__dict__:
-                continue
-            if not callable(getattr(ace, name)):
-                # cannot wrap a non-callable stuff
-                continue
-            # wrap
-            setattr(self, name, wrap_self(getattr(ace.__class__, name)))
-        # and then do anything to alter commands behavior...
+
+    def __getattribute__(self, name: str, /):
+        try:
+            attr = object.__getattribute__(self, name)
+            return attr
+        except AttributeError:
+            pass
+        return getattr(object.__getattribute__(self, 'master'), name)
+
+    def __setattr__(self, name: str, value, /):
+        master = object.__getattribute__(self, 'master')
+        if name in object.__getattribute__(self, '__dict__') and name not in master.__dict__:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(master, name, value)
+
+    def override(self, name: str, value):
+        object.__setattr__(self, name, value)
 
 
 def basic_command_set(ACE: AdminCommandExecutor):
