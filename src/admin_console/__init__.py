@@ -1073,15 +1073,13 @@ class AdminCommandEWrapper(AdminCommandExecutor):
 
     def __getattribute__(self, name: str, /):
         try:
-            attr = object.__getattribute__(self, name)
-            return attr
+            return object.__getattribute__(self, name)
         except AttributeError:
-            pass
-        return getattr(object.__getattribute__(self, 'master'), name)
+            return getattr(object.__getattribute__(self, 'master'), name)
 
     def __setattr__(self, name: str, value, /):
         master = object.__getattribute__(self, 'master')
-        if name in object.__getattribute__(self, '__dict__') and name not in master.__dict__:
+        if name in object.__getattribute__(self, '__dict__'):
             object.__setattr__(self, name, value)
         else:
             setattr(master, name, value)
