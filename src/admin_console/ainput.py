@@ -8,7 +8,7 @@ import asyncio
 import os
 import sys
 from enum import Enum
-from typing import Union, Sequence, Tuple, MutableSequence, Optional
+from typing import Union, Sequence, Tuple, MutableSequence, Optional, Callable, Coroutine, Any
 import traceback
 
 # raw mode features
@@ -50,6 +50,15 @@ def truelen(text: str) -> int:
     """Returns amount of visible-on-terminal characters in the string"""
     nocsi = ansi_escape.sub('', text)
     return len(''.join(x for x in nocsi if x.isprintable()))
+
+
+def truelen_list(seq: Sequence[str]) -> int:
+    """Returns amount of visible-on-terminal characters in the sequence of strings"""
+    return sum(char.isprintable() for char in seq)
+
+
+def _isprintable_predicate(char: str) -> bool:
+    return char.isprintable()
 
 
 class colors(Enum):
@@ -192,6 +201,7 @@ class AsyncRawInput():
         self.echo = True
         self.ctrl_c = None
         self.keystrokes = {}
+        self.default_kshandler: Optional[Callable[[str, list], Coroutine[Any, Any, Any]]] = None
         self.prompt_formats: Sequence[Tuple[str, str]] = ('', '')
         self.input_formats: Sequence[Tuple[str, str]] = ('', '')
         self._prompting_task: Optional[asyncio.Task] = None
@@ -376,11 +386,11 @@ class AsyncRawInput():
             history_pos = 0
             history_incomplete = self.read_lastinp
             # absolute cursor position is calculated using truelen(prompt) + self.cursor
+            # dye the user input by the specified color
+            self.stdout.write(self.input_formats[0])
+            self.stdout.flush()
             while self.is_reading:
                 self.loop.add_reader(self.stdin.fileno(), stdin_reader)
-                # dye the user input by the specified color
-                self.stdout.write(self.input_formats[0])
-                self.stdout.flush()
                 # suspend until a key is pressed
                 await read_clk.wait()
                 self.loop.remove_reader(self.stdin.fileno())
@@ -389,82 +399,90 @@ class AsyncRawInput():
                 if keystroke in self.keystrokes:
                     await self.keystrokes[keystroke]()
                     continue
-                if len(key) == 1:
-                    if ord(key[0]) == 127 or ord(key[0]) == 8:
-                        # do backspace
-                        if self.read_lastinp and self.cursor != 0:
-                            self.read_lastinp.pop(self.cursor - 1)
-                            self.cursor -= 1
-                            if echo:
-                                self.redraw_lastinp(self.cursor)
-                        continue
-                    elif ord(key[0]) == 3:
-                        # Ctrl + C
-                        if self.ctrl_c is None:
-                            raise RuntimeError('Ctrl + C is not handled')
+                if not keystroke.isprintable():
+                    # one of the characters are not printable, which means that this is a keystroke
+                    if len(key) == 1:
+                        if ord(key[0]) == 127 or ord(key[0]) == 8:
+                            # do backspace
+                            if self.read_lastinp and self.cursor != 0:
+                                self.read_lastinp.pop(self.cursor - 1)
+                                self.cursor -= 1
+                                if echo:
+                                    self.redraw_lastinp(self.cursor)
+                        elif ord(key[0]) == 3:
+                            # Ctrl + C
+                            if self.ctrl_c is None:
+                                raise RuntimeError('Ctrl + C is not handled')
+                            else:
+                                await self.ctrl_c()
+                        elif ord(key[0]) == 13 or ord(key[0]) == 10:
+                            # submit the input
+                            break
+                    elif ord(key[0]) == 27 and len(key) >= 3:
+                        # probably arrow keys or other keystrokes
+                        if keystroke == '\33[D':
+                            # cursor left
+                            if self.cursor > 0:
+                                self.cursor -= 1
+                                # self.stdout.write('\33[D')
+                                if self.echo:
+                                    self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
+                                    self.stdout.flush()
+                        elif keystroke == '\33[C':
+                            # cursor right
+                            if self.cursor < len(self.read_lastinp):
+                                self.cursor += 1
+                                # self.stdout.write('\33[C')
+                                if self.echo:
+                                    self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
+                                    self.stdout.flush()
+                        elif keystroke == '\33[A':
+                            # move older history (cursor up)
+                            if self.history and not history_disabled:
+                                if history_pos < len(self.history):
+                                    history_pos += 1
+                                    # load previous command
+                                    self.read_lastinp = list(self.history[-history_pos])
+                                    self.cursor = len(self.read_lastinp)
+                                    if self.echo:
+                                        self.redraw_lastinp(1)
+                        elif keystroke == '\33[B':
+                            # move newer history (cursor)
+                            if self.history and not history_disabled:
+                                if history_pos == 1:
+                                    history_pos = 0
+                                    # load incomplete command
+                                    self.read_lastinp = history_incomplete
+                                    self.cursor = len(self.read_lastinp)
+                                    if self.echo:
+                                        self.redraw_lastinp(1)
+                                elif history_pos > 0:
+                                    history_pos -= 1
+                                    # load next command
+                                    self.read_lastinp = list(self.history[-history_pos])
+                                    self.cursor = len(self.read_lastinp)
+                                    self.redraw_lastinp(1)
+                        # else:
+                        #     self.writeln('Unknown keystroke: %s' % ', '.join(repr(x) for x in key), fgcolor=colors.RED, bold=True)
+                    elif self.default_kshandler is not None:
+                        if asyncio.iscoroutinefunction(self.default_kshandler):
+                            await self.default_kshandler(keystroke, key)
                         else:
-                            await self.ctrl_c()
-                        continue
-                    elif ord(key[0]) == 13 or ord(key[0]) == 10:
-                        # submit the input
-                        break
-                elif ord(key[0]) == 27 and len(key) == 3:
-                    # probably arrow keys or other keystrokes
-                    if keystroke == '\33[D':
-                        # cursor left
-                        if self.cursor > 0:
-                            self.cursor -= 1
-                            # self.stdout.write('\33[D')
-                            if self.echo:
-                                self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
-                                self.stdout.flush()
-                    elif keystroke == '\33[C':
-                        # cursor right
-                        if self.cursor < len(self.read_lastinp):
-                            self.cursor += 1
-                            # self.stdout.write('\33[C')
-                            if self.echo:
-                                self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
-                                self.stdout.flush()
-                    elif keystroke == '\33[A':
-                        # move older history (cursor up)
-                        if self.history and not history_disabled:
-                            if history_pos < len(self.history):
-                                history_pos += 1
-                                # load previous command
-                                self.read_lastinp = list(self.history[-history_pos])
-                                self.cursor = len(self.read_lastinp)
-                                if self.echo:
-                                    self.redraw_lastinp(1)
-                    elif keystroke == '\33[B':
-                        # move newer history (cursor)
-                        if self.history and not history_disabled:
-                            if history_pos == 1:
-                                history_pos = 0
-                                # load incomplete command
-                                self.read_lastinp = history_incomplete
-                                self.cursor = len(self.read_lastinp)
-                                if self.echo:
-                                    self.redraw_lastinp(1)
-                            elif history_pos > 0:
-                                history_pos -= 1
-                                # load next command
-                                self.read_lastinp = list(self.history[-history_pos])
-                                self.cursor = len(self.read_lastinp)
-                                self.redraw_lastinp(1)
-                    else:
-                        self.writeln('Unknown keystroke: %s' % ', '.join(repr(x) for x in key), fgcolor=colors.RED, bold=True)
+                            self.default_kshandler(keystroke, key)
+                    # always reread after a keystroke dispatched
                     continue
-                # letter input
-                for i in range(len(key)):
-                    self.read_lastinp.insert(self.cursor + i, key[i])
-                self.cursor += len(key)
-                if echo:
-                    if self.cursor < len(self.read_lastinp):
-                        self.redraw_lastinp(self.cursor)
-                    else:
-                        self.stdout.write(''.join(key))
-                self.stdout.flush()
+                else:
+                    # letter input
+                    # for i in range(len(key)):
+                    #    self.read_lastinp.insert(self.cursor + i, key[i])
+                    self.read_lastinp[self.cursor:self.cursor] = keystroke
+                    self.cursor += len(key)
+                    if echo:
+                        if self.cursor < len(self.read_lastinp):
+                            self.redraw_lastinp(self.cursor)
+                        else:
+                            self.stdout.write(''.join(key))
+                    self.stdout.flush()
             # remove input format
             result = ''.join(self.read_lastinp)
             if self.history is not None and not history_disabled:
