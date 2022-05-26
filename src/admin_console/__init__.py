@@ -30,15 +30,28 @@ import logging
 import re
 import warnings
 from math import ceil
-from typing import Union, Sequence, Tuple, Mapping, MutableMapping, Awaitable, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
+from typing import Union, Sequence, MutableSequence, Tuple, Mapping, MutableMapping, Awaitable, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
 from collections import ChainMap, defaultdict
 from aiohndchain import AIOHandlerChain
+from itertools import count as itercount
+from itertools import chain, repeat, dropwhile, islice
 
 
-ArgumentType = Union[str, int, float, bool, None]
+class CustomType:
+    """Base class inherited by all custom types for commands. Has only one predefined method that all derivative types must have: getValue()"""
+    def getValue(self):
+        """Obtain a value from this type wrapper"""
+        return self._value
+
+    def tabComplete(self, value: str):
+        """Return a tuple containing all available items from a starting value"""
+        return tuple()
+
+
+ArgumentType = Union[str, int, float, bool, None, CustomType]
 argsplitter = re.compile('(?<!\\\\)".*?(?<!\\\\)"|(?<!\\\\)\'.*?(?<!\\\\)\'|[^ ]+')
 backslasher = re.compile(r'(?<!\\)\\(.)')
-allescapesplitter = re.compile(r'(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-7]{1,3}|\\[abfnrtv])')
+allescapesplitter = re.compile(r'(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-7]{1,3}|\\[abfnrtv"\'])')
 octal = re.compile(r'\\[0-7]{1,3}')
 quoted = re.compile(r'(?P<quote>["\']).*?(?P=quote)')
 hexescapefinder = re.compile('(?<!\\\\)\\\\x[0-9a-fA-F]{2}')
@@ -50,16 +63,88 @@ single_char_escaper = {
     "r": "\r",
     "t": "\t",
     "v": "\v",
+    '"': '"',
+    "'": "'",
     " ": " "
 }
 
 
-class InvalidArgument(Exception):
-    pass
+class InvalidArgument(ValueError):
+    """Raised by AdminCommandExecutor.parse_args() when one of the arguments cannot be parsed"""
 
 
 class NotEnoughArguments(Exception):
-    pass
+    """Raised by AdminCommandExecutor.dispatch() when command string doesn't have enough arguments"""
+
+
+# Additional derivative types for commands
+class BaseDiscreteScale(int, CustomType):
+    """Base class for defining discrete scale types. An inheritor must either implement getMin, getMax, getStep methods or
+    set self._min, self._max and self._step variables accordingly.
+    Default value for _step is 1"""
+    _step = 1
+
+    def __init__(self, value, /, *args, **kwargs):
+        if self._step == 0:
+            raise ValueError("_step must not be zero")
+        num = super().__init__(value, *args, **kwargs)
+        _start, _end, _step = self.getMin(), self.getMax(), self.getStep()
+        if num not in range(_start, _end, _step):
+            raise InvalidArgument("an integer must be in range between %d and %d by +%d each" % (
+                                  _start, _end, _step))
+        self._value = num
+
+    def getValue(self) -> int:
+        return self._value
+
+    def getMin(self) -> int:
+        """Returns the lowest point of a scale"""
+        return self._min
+
+    def getMax(self) -> int:
+        """Returns the highest point of a scale"""
+        return self._max
+
+    def getStep(self) -> int:
+        """Returns the distance between each elements"""
+        return self._step
+
+
+class EnumType(BaseDiscreteScale):
+    """Base class for defining a discrete scale of certain objects (e.g. words, literal phrases)"""
+
+
+class BaseContinuousScale(float, CustomType):
+    """"""
+    _step = 1
+
+    def __init__(self, value, /, *args, **kwargs):
+        if self._step == 0:
+            raise ValueError("_step must not be zero")
+        num = super().__init__(value, *args, **kwargs)
+        _start, _end, _step = self.getMin(), self.getMax(), self.getStep()
+        if num not in range(_start, _end, _step):
+            raise InvalidArgument("an integer must be in range between %d and %d by +%d each" % (
+                                  _start, _end, _step))
+        self._value = num
+
+    def getValue(self) -> int:
+        return self._value
+
+    def getMin(self) -> int:
+        """Returns the lowest point of a scale"""
+        return self._min
+
+    def getMax(self) -> int:
+        """Returns the highest point of a scale"""
+        return self._max
+
+
+class DurationType(CustomType):
+    def __init__(self, value: str = '', *, from_timedelta: datetime.timedelta = None):
+        if from_timedelta is not None:
+            self._value = from_timedelta
+            return
 
 
 def parse_escapes(inp: str):
@@ -198,7 +283,7 @@ class AdminCommand():
                 handle(False)
                 raise
 
-    async def tab_complete(self, executor, args: Sequence[object]) -> Union[tuple, None]:
+    async def tab_complete(self, executor, args: Sequence[object], argl: str = '') -> Union[Sequence[str], None]:
         """Shouldn't be overriden, use atabcomplete to assign a tab complete handler"""
         async with executor.cmdtab_event.emit_and_handle(self, executor, args) as handle:
             if self.atabcomplete is not None:
@@ -207,7 +292,15 @@ class AdminCommand():
                     if 'override' in _kwargs:
                         return _kwargs['override']
                     elif _res:
-                        return await self.atabcomplete(executor, *args)
+                        if args:
+                            _last = args[-1]
+                            if isinstance(_last, CustomType):
+                                _last: CustomType
+                                # attempt to tabcomplete that one
+                                if asyncio.iscoroutinefunction(_last.tabComplete):
+                                    # TODO
+                                    pass
+                        return await self.atabcomplete(executor, *args, argl=argl)
                 except Exception:
                     handle(False)
                     raise
@@ -453,7 +546,10 @@ class AdminCommandExecutor():
             'usage': 'Usage: %s',
             'invalidarg': '%s is invalid, check your command arguments.',
             'toomanyargs': 'warning: this command receives %s arguments, you provided %s or more',
-            'notenoughargs': 'not enough arguments: the command receives %s arguments, you provided %s.'
+            'notenoughargs': 'not enough arguments: the command receives %s arguments, you provided %s.',
+            'cancelled': "Process has been cancelled",
+            'command_error': "Command execution failed: %s",
+            'tab_error': "Tabcomplete failed: %s"
         }
         self.types: Dict[ArgumentType, str] = {
             str: 'word',
@@ -482,7 +578,10 @@ class AdminCommandExecutor():
         self.input_format = {'fgcolor': 10}
         self.logger = logger
         self.tab_complete_lastinp = ''
+        self.tab_complete_cursor: Optional[int] = None
         self.tab_complete_tuple: Sequence[str] = tuple()
+        self.tab_complete_slices: MutableSequence[re.Match] = []
+        self.tab_complete_argsfrom: Optional[int] = None
         self.tab_complete_id = 0
         # events
         self.events = defaultdict(lambda: AIOHandlerChain())
@@ -642,10 +741,9 @@ class AdminCommandExecutor():
             Success
         """
         try:
-            file = open(path, 'r')
-            self.info('')
-            self.config = json.loads(file.read())
-            file.close()
+            with open(path, 'r') as file:
+                self.info('')
+                self.config = json.loads(file.read())
             return True
         except (json.JSONDecodeError, OSError):
             self.error("Error occurred during load of the config: \n%s" % traceback.format_exc())
@@ -668,9 +766,8 @@ class AdminCommandExecutor():
             Success
         """
         try:
-            file = open(path, 'w')
-            file.write(json.dumps(self.config, indent=True))
-            file.close()
+            with open(path, 'w') as file:
+                file.write(json.dumps(self.config, indent=True))
             return True
         except OSError:
             self.error('Failed to save configuration at %s' % path)
@@ -757,7 +854,7 @@ class AdminCommandExecutor():
                 handle(False)
                 return False
 
-    def parse_args(self, argl: str, argtypes: Sequence[Tuple[ArgumentType, str]] = None, opt_argtypes: Sequence[Tuple[ArgumentType, str]] = None, *, raise_exc=True) -> (list, str):
+    def parse_args(self, argl: str, argtypes: Sequence[Tuple[ArgumentType, str]] = None, opt_argtypes: Sequence[Tuple[ArgumentType, str]] = None, *, raise_exc=True, saved_matches: Optional[MutableSequence[re.Match]] = None, until: Optional[int] = None) -> (list, str):
         """
         Smart split the argument line and convert all the arguments to its types
         Raises InvalidArgument(argname) if one of the arguments couldn't be converted
@@ -773,8 +870,18 @@ class AdminCommandExecutor():
         opt_argtypes : list
             Same as argtypes, but those arguments are parsed after mandatory and are optional.
             Doesn't cause NotEnoughArguments to be raise if there is not enough optional arguments
+
+        Keyword-only parameters:
         raise_exc : bool
             Whether or not exceptions are raised. If False, data is returned as it is
+        saved_matches : list
+            If specified, the parser will append the re.Match objects for each argument
+            to this list except the last NoneType argument (if present in args),
+            which does not have any boundaries
+        until : int
+            If specified, will stop parsing arguments when passed more than n symbols.
+            Useful when passing sliced string isn't good due to storing argument boundaries
+            in saved_matches.
 
         Returns
         -------
@@ -783,27 +890,36 @@ class AdminCommandExecutor():
             If remnant isn't an empty string, then there is probably too many arguments provided
         """
         args = []
+        remnant = argl
+        arg_iterator = chain(argsplitter.finditer(argl), repeat(None))
         if argtypes:
-            for argtype, argname in argtypes:
+            for argdata, argmatch in zip(argtypes, arg_iterator):
+                argtype, argname = argdata
                 if argtype is None:
-                    args.append(parse_escapes(argl))
-                    argl = ''
+                    args.append(parse_escapes(remnant))
+                    remnant = ''
                     break
-                # arg, _, argl = argl.partition(' ')
-                argmatch = argsplitter.search(argl)
                 if not argmatch:
                     if raise_exc:
                         raise NotEnoughArguments(len(argtypes), len(args))
                     else:
-                        return args, argl
-                arg = argl[argmatch.start():argmatch.end()]
-                argl = argl[argmatch.end():]
+                        return args, remnant
+                if saved_matches is not None:
+                    saved_matches.append(argmatch)
+                if until is not None:
+                    _argend = min(argmatch.end(), until)
+                else:
+                    _argend = argmatch.end()
+                if _argend <= argmatch.start():
+                    return args, ''
+                arg = argl[argmatch.start():_argend]
+                remnant = argl[_argend:]
                 if quoted.fullmatch(arg) is not None:
                     arg = arg[1:-1]
                 try:
-                    if argtype is bool:
+                    if issubclass(argtype, bool):
                         args.append(True if arg.lower() in ['true', 'yes', 'y', '1'] else False)
-                    elif argtype is str:
+                    elif issubclass(argtype, str):
                         args.append(parse_escapes(arg))
                     else:
                         args.append(argtype(arg))
@@ -812,24 +928,35 @@ class AdminCommandExecutor():
                         raise InvalidArgument(argname)
                     else:
                         args.append(arg)
-                        return args, argl
+                        return args, remnant
         if opt_argtypes:
-            for argtype, argname in opt_argtypes:
-                if argtype is None and argl:
-                    args.append(argl)
-                    argl = ''
+            # continue iterating over the same arguments list
+            for argdata, argmatch in zip(opt_argtypes, arg_iterator):
+                argtype, argname = argdata
+                if argtype is None and remnant:
+                    args.append(remnant)
+                    remnant = ''
                     break
-                elif not argl:
+                elif not remnant:
                     break
-                argmatch = argsplitter.search(argl)
-                arg = argl[argmatch.start():argmatch.end()]
-                argl = argl[argmatch.end():]
+                if argmatch is None:
+                    return args, remnant
+                if saved_matches is not None:
+                    saved_matches.append(argmatch)
+                if until is not None:
+                    _argend = min(argmatch.end(), until)
+                else:
+                    _argend = argmatch.end()
+                if _argend <= argmatch.start():
+                    return args, ''
+                arg = argl[argmatch.start():_argend]
+                remnant = argl[_argend:]
                 if quoted.fullmatch(arg) is not None:
                     arg = arg[1:-1]
                 try:
-                    if argtype is bool:
+                    if issubclass(argtype, bool):
                         args.append(True if arg.lower() in ['true', 'yes', 'y', '1'] else False)
-                    elif argtype is str:
+                    elif issubclass(argtype, str):
                         args.append(parse_escapes(arg))
                     else:
                         args.append(argtype(arg))
@@ -838,8 +965,8 @@ class AdminCommandExecutor():
                         raise InvalidArgument(argname)
                     else:
                         args.append(arg)
-                        return args, argl
-        return args, argl
+                        return args, remnant
+        return args, remnant
 
     async def dispatch(self, cmdline: str) -> bool:
         """Executes a command. Shouldn't be used explicitly. Use prompt_loop() instead.
@@ -877,7 +1004,7 @@ class AdminCommandExecutor():
             self.print(self.usage(cmdname))
         except Exception as exc:
             self.print("An exception just happened in this command, check logs or smth...")
-            self.error("Command execution failed: %s" % exc)
+            self.error(self.lang['command_error'] % exc)
 
     def usage(self, cmdname: str, lang=True) -> str:
         """Get a formatted usage string for the command
@@ -946,57 +1073,96 @@ class AdminCommandExecutor():
         """This is callback function for TAB key event
            Uses AsyncRawInput data to handle the text update
         """
-        inp = ''.join(self.ainput.read_lastinp[0:self.ainput.cursor])
-        if not inp or not self.prompt_dispatching:
+        whole_inp = ''.join(self.ainput.read_lastinp)
+        inp_beginning = whole_inp[0:self.ainput.cursor]
+        rest = whole_inp[self.ainput.cursor:]
+        if not inp_beginning or not self.prompt_dispatching:
             return
-        if self.tab_complete_lastinp != inp:
-            # generate new suggestions and replace last argument
-            cmdname, sep, argl = inp.partition(' ')
+        if self.tab_complete_lastinp != whole_inp or self.tab_complete_cursor != self.ainput.cursor:
+            self.tab_complete_slices.clear()
+            # generate new suggestions and append or replace the argument
+            cmdname, sep, argl = whole_inp.partition(' ')
+            self.tab_complete_argsfrom = len(cmdname) + 1
             if not sep:
                 # generate list of command suggestions
                 self.tab_complete_tuple = []
                 for cmdname in self.commands:
-                    if cmdname.startswith(inp) and self.commands[cmdname] is not self.disabledCmd:
+                    if cmdname.startswith(inp_beginning) and self.commands[cmdname] is not self.disabledCmd:
                         self.tab_complete_tuple.append(cmdname)
                 self.tab_complete_id = 0
                 self.ainput.writeln('\t'.join(self.tab_complete_tuple), fgcolor=colors.GREEN)
             else:
-                argl = argl.strip()
+                argl = argl.lstrip()
                 if cmdname not in self.commands:
                     return
                 cmd: AdminCommand = self.commands[cmdname]
                 if cmd is self.disabledCmd:
                     return
                 try:
-                    args, argl = self.parse_args(argl, cmd.args, cmd.optargs, raise_exc=False)
-                    if argl:
-                        self.print(self.lang['toomanyargs'] % (len(cmd.args) + len(cmd.optargs), len(args) + 1))
-                        self.print(repr(argl))
-                        self.print(self.usage(cmdname))
-                    suggestions = await cmd.tab_complete(self, args)
+                    args, argl = self.parse_args(argl, cmd.args, cmd.optargs, raise_exc=False,
+                                                 saved_matches=self.tab_complete_slices,
+                                                 until=self.ainput.cursor - self.tab_complete_argsfrom)
+                    suggestions = await cmd.tab_complete(self, args, argl)
                     if suggestions is not None:
                         self.ainput.writeln('\t'.join(suggestions), fgcolor=colors.GREEN)
                     self.tab_complete_tuple = suggestions
                     self.tab_complete_id = 0
                 except asyncio.CancelledError:
                     if self.prompt_dispatching:
-                        self.print("Process has been cancelled")
-            self.tab_complete_lastinp = inp
+                        self.print(self.lang['cancelled'])
+                except InvalidArgument as exc:
+                    # one of the arguments are invalid
+                    self.print(self.lang['invalidarg'] % exc.args[0])
+                    self.tab_complete_tuple = tuple()
+                except Exception as exc:
+                    # other error
+                    self.error(self.lang['tab_error'] % str(exc))
+                    self.tab_complete_tuple = tuple()
+            self.tab_complete_lastinp = whole_inp
+            self.tab_complete_cursor = self.ainput.cursor
         elif self.tab_complete_tuple:
-            # cycle through the suggestions and replace last argument
+            # cycle through the suggestions
             self.tab_complete_id = (self.tab_complete_id + 1) % len(self.tab_complete_tuple)
-        # replace last argument
+        # replace the n-th argument
         if self.tab_complete_tuple:
-            _, _, last_arg = inp.rpartition(' ')
+            # pick the boundaries
+            _bounds, _bound_id = next(
+                dropwhile(self._cursor_boundary_predicate,
+                          zip(self.tab_complete_slices, itercount())),
+                (None, None)
+            )
+            _bounds: Optional[re.Match]
+            _bound_id: Optional[int]
+            _, _, last_arg = inp_beginning.rpartition(' ')
             target = self.tab_complete_tuple[self.tab_complete_id]
             if not last_arg:
+                # append the resulting argument
                 self.ainput.read_lastinp.extend(target)
+                self.tab_complete_cursor = self.ainput.cursor = len(self.ainput.read_lastinp)
+            elif _bounds is not None:
+                # replace the resulting argument
+                # self.ainput.read_lastinp[-len(last_arg) - len(rest):] = target
+                self.ainput.read_lastinp[_bounds.start() + self.tab_complete_argsfrom:
+                                         _bounds.end() + self.tab_complete_argsfrom] = target
+                self.tab_complete_cursor = self.ainput.cursor = _bounds.start() + self.tab_complete_argsfrom + len(target)
             else:
-                self.ainput.read_lastinp[-len(last_arg):] = target
-            self.ainput.cursor = len(self.ainput.read_lastinp)
+                self.ainput.read_lastinp[-len(last_arg) - len(rest):] = target
+                self.tab_complete_cursor = self.ainput.cursor = len(self.ainput.read_lastinp)
             self.ainput.redraw_lastinp(1)
-            inp = ''.join(self.ainput.read_lastinp[0:self.ainput.cursor])
-            self.tab_complete_lastinp = inp
+            whole_inp = ''.join(self.ainput.read_lastinp)
+            self.tab_complete_lastinp = whole_inp
+            if _bounds is not None:
+                # also, after replacing the argument, reparse all the stuff
+                _amount = len(self.tab_complete_slices)
+                del self.tab_complete_slices[_bound_id:]
+                self.tab_complete_slices.extend(
+                    islice(argsplitter.finditer(whole_inp[self.tab_complete_argsfrom:], _bounds.start()), _amount)
+                )
+
+    def _cursor_boundary_predicate(self, id_match: Tuple[re.Match, int]) -> bool:
+        match_, _ = id_match
+        _argpos = self.ainput.cursor - self.tab_complete_argsfrom
+        return match_.start() < _argpos and _argpos > match_.end()
 
 
 class FakeAsyncRawInput():
@@ -1085,6 +1251,9 @@ class AdminCommandEWrapper(AdminCommandExecutor):
             setattr(master, name, value)
 
     def override(self, name: str, value):
+        """Change the member of the class, but apply it only for the wrapper, not the real command executor
+        For example, replace ainput with something else if the command needs to query input and show messages
+        in a different way, rather than doing this in the main console"""
         object.__setattr__(self, name, value)
 
 
@@ -1147,7 +1316,7 @@ def basic_command_set(ACE: AdminCommandExecutor):
         else:
             self.print("%s unloaded." % name)
 
-    async def extunload_tab(self: AdminCommandExecutor, *args):
+    async def extunload_tab(self: AdminCommandExecutor, *args, argl: str):
         name = args[0]
         res = []
         for extname in self.extensions:
@@ -1198,11 +1367,17 @@ def basic_command_set(ACE: AdminCommandExecutor):
     async def testoptargs(self: AdminCommandExecutor, mand1: str, opt1: int = 0, opt2: str = '', opt3: int = 0):
         self.print(mand1, opt1, opt2, opt3)
 
-    async def testoptargs_tab(self: AdminCommandExecutor, *args):
-        if len(args) == 0:
+    async def testoptargs_tab(self: AdminCommandExecutor, *args, argl: str):
+        _len = len(args)
+        if argl:
+            _len += 1
+        self.print('Arguments: (%s)' % ', '.join(str(x) for x in args))
+        self.print('Argument amount: %d' % _len)
+        self.print('Remnant: "%s"' % argl)
+        if _len <= 1:
             return "example", "another", "main", "obsolete"
-        elif len(args) == 2:
-            return "optional", "not", "needed"
+        elif _len == 2:
+            return '1', '2', '3', '4'
     commands_['testoptargs'] = AdminCommand(testoptargs, 'testoptargs', [(str, 'mandatory')], ((int, 'opt1'), (str, 'opt2'), (int, 'opt3')), 'See how argument parsing and tabcomplete works', testoptargs_tab)
 
     if ACE.extensions:
