@@ -74,15 +74,18 @@ async def extension_init(self: AdminCommandExtension):
     async def my_command(cmd: AdminCommandExecutor, arg1: str, arg2: int, arg3: bool, arg4: float, arg5: str):
         # do it yourself
         pass
-    async def my_command_tab(cmd: AdminCommandExecutor, *args):
-        if len(args) == 0:
+    async def my_command_tab(cmd: AdminCommandExecutor, *args, argl: str):
+        _len = len(args)
+        if argl:
+            _len += 1
+        if _len == 0:
             # arg1 is being tabbed, which is a single word
             return "foo", "bar", "lore", "bug"
-        elif len(args) == 1:
+        elif _len == 1:
             # arg2 is being tabbed, which is int
             # do not tabcomplete an integer...
             pass
-        elif len(args) == 2:
+        elif _len == 2:
             # it is possible to tabcomplete a boolean, which is just yes or no
             return "yes", "no"
     self.add_command(my_command, 'my-command', ((str, 'some word'), (int, 'your amount'), (bool, 'yes or no?'), (float, 'write precise PI here'), (None, 'long line...')), my_command_tab)
@@ -96,7 +99,7 @@ Make a file at the extensions directory with the contents above. The extension s
 To tell the extension loader to load scripts in the specified order, make `extdep.txt` in the `extensions/` directory
 and fill the file names (without .py) on each line.
 ## Documentation
-Simple rendered docs are here: https://nobwow.github.io/admin_console.html
+Simple rendered reference is here: https://nobwow.github.io/admin_console.html
 ## Installation/Updating (from git)
 
 `pip install -U git+https://github.com/NobWow/admin-console-python.git`
