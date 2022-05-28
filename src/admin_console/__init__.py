@@ -798,7 +798,7 @@ class AdminCommandExecutor():
             if '../' in _path or _path.startswith('/'):
                 self.error("Failed to load extension %s: path should not be absolute or contain \"..\"" % name)
                 return False
-            spec = importlib.util.spec_from_file_location(name, _path)
+            spec = importlib.util.spec_from_file_location(name, _path, submodule_search_locations=[self.extpath])
             module = importlib.util.module_from_spec(spec)
             try:
                 spec.loader.exec_module(module)
@@ -896,7 +896,7 @@ class AdminCommandExecutor():
             for argdata, argmatch in zip(argtypes, arg_iterator):
                 argtype, argname = argdata
                 if argtype is None:
-                    args.append(parse_escapes(remnant))
+                    args.append(parse_escapes(remnant.lstrip()))
                     remnant = ''
                     break
                 if not argmatch:
@@ -934,7 +934,7 @@ class AdminCommandExecutor():
             for argdata, argmatch in zip(opt_argtypes, arg_iterator):
                 argtype, argname = argdata
                 if argtype is None and remnant:
-                    args.append(remnant)
+                    args.append(parse_escapes(remnant.lstrip()))
                     remnant = ''
                     break
                 elif not remnant:
