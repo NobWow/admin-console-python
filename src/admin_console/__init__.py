@@ -29,8 +29,8 @@ import datetime
 import logging
 import re
 import warnings
-from math import ceil
-from typing import Union, Sequence, MutableSequence, Tuple, Mapping, MutableMapping, Awaitable, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
+from math import ceil, prod
+from typing import Union, Sequence, MutableSequence, Tuple, Mapping, MutableMapping, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
 from collections import ChainMap, defaultdict
 from aiohndchain import AIOHandlerChain
 from itertools import count as itercount
@@ -40,11 +40,23 @@ from itertools import chain, repeat, dropwhile, islice
 class CustomType:
     """Base class inherited by all custom types for commands. Has only one predefined method that all derivative types must have: getValue()"""
     def getValue(self):
-        """Obtain a value from this type wrapper"""
+        """
+        Obtain a value from this type wrapper
+        """
+        return self._value
+
+    def serialize(self) -> Union[str, int, float, bool, None]:
+        """
+        Obtain primitive value representing this object
+        Can be async
+        """
         return self._value
 
     def tabComplete(self, value: str):
-        """Return a tuple containing all available items from a starting value"""
+        """
+        Return a tuple containing all available items from a starting value
+        Can be async
+        """
         return tuple()
 
 
@@ -55,6 +67,7 @@ allescapesplitter = re.compile(r'(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-
 octal = re.compile(r'\\[0-7]{1,3}')
 quoted = re.compile(r'(?P<quote>["\']).*?(?P=quote)')
 hexescapefinder = re.compile('(?<!\\\\)\\\\x[0-9a-fA-F]{2}')
+zerostr = '0'
 single_char_escaper = {
     "a": "\a",
     "b": "\b",
@@ -66,6 +79,33 @@ single_char_escaper = {
     '"': '"',
     "'": "'",
     " ": " "
+}
+default_lang = {
+    'date_fmt': '%m/%d/%y',
+    'time_fmt': '%H:%M:%S',
+    'datetime_fmt': '%a %b %e %H:%M:%S %Y',
+    'nocmd': '{}: unknown command',
+    'usage': 'Usage: {}',
+    'invalidarg': '{} is invalid, check your command arguments.',
+    'toomanyargs': 'warning: this command receives {0} arguments, you provided {1} or more',
+    'notenoughargs': 'not enough arguments: the command receives {0} arguments, you provided {1}.',
+    'cancelled': "Process has been cancelled",
+    'command_error': "Command execution failed: {}",
+    'tab_error': "Tabcomplete failed: {}",
+    'help_cmd': 'Help (page {0} out of {1})\n{2}',
+    'extensions_cmd': 'Extensions (page {0} of {1}):\n{2}',
+    'extension_fail': '{} failed to load.',
+    'extension_loaded': '{} loaded.',
+    'extension_notfound': '{} is not loaded.',
+    'extension_failcleanup': '{} unloaded but failed to cleanup.',
+    'extension_unloaded': '{} unloaded.'
+}
+default_types = {
+    str: 'word',
+    int: 'n',
+    float: 'n.n',
+    bool: 'yes / no',
+    None: 'text...'
 }
 
 
@@ -90,8 +130,7 @@ class BaseDiscreteScale(int, CustomType):
         num = super().__init__(value, *args, **kwargs)
         _start, _end, _step = self.getMin(), self.getMax(), self.getStep()
         if num not in range(_start, _end, _step):
-            raise InvalidArgument("an integer must be in range between %d and %d by +%d each" % (
-                                  _start, _end, _step))
+            raise InvalidArgument(f"an integer must be in range between {_start} and {_end} by +{_step} each")
         self._value = num
 
     def getValue(self) -> int:
@@ -124,27 +163,73 @@ class BaseContinuousScale(float, CustomType):
         num = super().__init__(value, *args, **kwargs)
         _start, _end, _step = self.getMin(), self.getMax(), self.getStep()
         if num not in range(_start, _end, _step):
-            raise InvalidArgument("an integer must be in range between %d and %d by +%d each" % (
+            raise InvalidArgument("an integer must be in range between {0} and {1} by +{2} each".format(
                                   _start, _end, _step))
         self._value = num
 
-    def getValue(self) -> int:
+    def getValue(self) -> float:
         return self._value
 
-    def getMin(self) -> int:
+    def getMin(self) -> float:
         """Returns the lowest point of a scale"""
         return self._min
 
-    def getMax(self) -> int:
+    def getMax(self) -> float:
         """Returns the highest point of a scale"""
         return self._max
 
 
+class DateTimeType(CustomType):
+    pass
+
+
 class DurationType(CustomType):
-    def __init__(self, value: str = '', *, from_timedelta: datetime.timedelta = None):
+    duration_expr = re.compile(
+        r"(?:(?P<yrs>\d+) *y(?:(?:ea)?r)?s?)?{0} *"
+        r"(?:(?P<mon>\d+) *(?:mon|M)(?:th)?s?)?{0} *"
+        r"(?:(?P<wks>\d+) *w(?:(?:ee)?k)?s?)?{0} *"
+        r"(?:(?P<ds>\d+) *d(?:ay)?s?)?{0} *"
+        r"(?:(?P<hrs>\d+) *h(?:(?:ou)?rs?)?)?{0} *"
+        r"(?:(?P<min>\d+) *m(?:in(?:ute)?s?)?)?{0} *"
+        r"(?:(?P<sec>\d+) *s(?:ec(?:ond)?)?s?)?{0} *"
+        r"(?:(?P<msec>\d+) *m(?:illi)?s(?:ec(?:ond)?)?s?)?{0} *"
+        r"(?:(?P<mcsec>\d+) *(?:mi?cr?o?|u)s(?:ec(?:ond)?)?s?)? *"
+        "".format(r"(?:[.,]| *and)?")
+    )  # ---------------------------------------------------------
+    _mul = (
+        31557600,
+        2629800,
+        604800,
+        86400,
+        3600,
+        60,
+        1,
+    )
+
+    def __init__(self, value: Optional[str] = None, *, raise_exc=True, from_timedelta: datetime.timedelta = None):
         if from_timedelta is not None:
             self._value = from_timedelta
             return
+        self._value = self.parse(value, raise_exc=raise_exc)
+
+    @classmethod
+    def parse(cls, value: str, *, raise_exc=True):
+        _match = cls.duration_expr.fullmatch(value)
+        if _match is None:
+            if raise_exc:
+                raise ValueError("invalid duration provided")
+        _group_iter = (0 if num is None else int(num) for num in _match.groups())
+        _seconds = sum(map(prod, zip(_group_iter, cls._mul)))
+        _msec = next(_group_iter, 0)
+        _usec = next(_group_iter, 0)
+        return datetime.timedelta(
+            seconds=_seconds,
+            milliseconds=_msec,
+            microseconds=_usec
+        )
+
+    def serialize(self):
+        return self._value.total_seconds()
 
 
 def parse_escapes(inp: str):
@@ -229,11 +314,11 @@ class AdminCommand():
         afunc, name, args, optargs, description) instead
     Emits AdminCommandExecutor.cmdexec_event, AdminCommandExecutor.cmdtab_event
     """
-    def __init__(self, afunc, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]], description: str = '', atabcomplete: Optional[Awaitable[Sequence[str]]] = None):
+    def __init__(self, afunc, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]], description: str = '', atabcomplete: Optional[Callable[Sequence[str], Coroutine[Any, Any, Any]]] = None):
         """
         Parameters
         ----------
-        afunc : coroutine
+        afunc : coroutine function
             await afunc(AdminCommandExecutor, *args)
             Coroutine function that represents the command functor and receives parsed arguments
         name : str
@@ -257,7 +342,7 @@ class AdminCommand():
             Types are described in args
         description : str
             Description of what this command does. Shows in help
-        atabcomplete : coroutine
+        atabcomplete : coroutine function
             await atabcomplete(AdminCommandExecutor, *args)
             Coroutine function that is called when a tab with the last incomplete or empty argument is specified
             Must return None or a collection of suggested arguments
@@ -422,11 +507,11 @@ class AdminCommandExtension():
 
     def msg(self, msg: str):
         """Show message in the console with the extension prefix"""
-        self.ace.print('[%s] %s' % (self.name, msg))
+        self.ace.print('[{}] {}'.format(self.name, msg))
 
     def logmsg(self, msg: str, level: int = logging.INFO):
         """Write a message into the log"""
-        self.logger.log(level, '[%s] %s' % (self.name, msg))
+        self.logger.log(level, '[{}] {}'.format(self.name, msg))
 
 
 class AdminCommandExecutor():
@@ -452,11 +537,11 @@ class AdminCommandExecutor():
     AdminCommandExecutor.lang : dict
         dictionary of formattable strings
         {
-            'nocmd': '%s: unknown command',
-            'usage': 'Usage: %s',
-            'invalidarg': '%s is invalid, check your command arguments.',
-            'toomanyargs': 'warning: this command receives %s arguments, you provided %s or more',
-            'notenoughargs': 'not enough arguments: the command receives %s arguments, you provided %s.'
+            'nocmd': '{0}: unknown command',
+            'usage': 'Usage: {0}',
+            'invalidarg': '{0} is invalid, check your command arguments.',
+            'toomanyargs': 'warning: this command receives {0} arguments, you provided {1} or more',
+            'notenoughargs': 'not enough arguments: the command receives {0} arguments, you provided {1}.'
         }
     AdminCommandExecutor.types : dict
         dictionary of typenames
@@ -541,31 +626,16 @@ class AdminCommandExecutor():
         self.stuff = stuff
         self.use_config = use_config
         self.commands: Union[Dict[str, AdminCommand], ChainMap] = ChainMap()
-        self.lang: Dict[str, str] = {
-            'nocmd': '%s: unknown command',
-            'usage': 'Usage: %s',
-            'invalidarg': '%s is invalid, check your command arguments.',
-            'toomanyargs': 'warning: this command receives %s arguments, you provided %s or more',
-            'notenoughargs': 'not enough arguments: the command receives %s arguments, you provided %s.',
-            'cancelled': "Process has been cancelled",
-            'command_error': "Command execution failed: %s",
-            'tab_error': "Tabcomplete failed: %s"
-        }
-        self.types: Dict[ArgumentType, str] = {
-            str: 'word',
-            int: 'n',
-            float: 'n.n',
-            bool: 'yes / no',
-            None: 'text...'
-        }
+        self.lang: Union[Dict[str, str], ChainMap] = ChainMap({}, default_lang)
+        self.types: Union[Dict[ArgumentType, str], ChainMap] = ChainMap({}, default_types)
         self.tasks: Dict[str, asyncio.Task] = {
             # 'task_name': asyncio.Task()
         }
         self.extensions: Dict[str, AdminCommandExtension] = {
             # 'extension name': AdminCommandExtension()
         }
-        self.full_cleanup_steps: Set[Awaitable] = set(
-            # awaitable functions
+        self.full_cleanup_steps: Set[Callable[Any, Coroutine[Any, Any, Any]]] = set(
+            # coroutine functions
         )
         self.extpath = extension_path
         self.prompt_dispatching = True
@@ -669,7 +739,7 @@ class AdminCommandExecutor():
         if self.logger:
             self.logger.error(msg)
         else:
-            self.ainput.writeln('ERROR: %s' % msg, fgcolor=colors.RED)
+            self.ainput.writeln('ERROR: {}'.format(msg), fgcolor=colors.RED)
 
     def info(self, msg: str):
         """Shows a regular info message in the console and logs.
@@ -682,7 +752,7 @@ class AdminCommandExecutor():
         if self.logger:
             self.logger.info(msg)
         else:
-            self.ainput.writeln('INFO: %s' % msg)
+            self.ainput.writeln('INFO: {}'.format(msg))
 
     def log(self, msg: str, level=10):
         """Shows a log message in the console and logs
@@ -698,7 +768,7 @@ class AdminCommandExecutor():
             self.logger.log(level, msg)
         elif level >= self.logger.getEffectiveLevel():
             levels = {0: 'NOTSET', 10: 'DEBUG', 20: 'INFO', 30: 'WARNING', 40: 'ERROR', 50: 'CRITICAL'}
-            self.ainput.writeln('%s: %s' % (levels[level], msg))
+            self.ainput.writeln('{}: {}'.format(levels[level], msg))
 
     async def load_extensions(self):
         """Loads extensions from an extension directory specified in AdminCommandExecutor.extpath"""
@@ -709,14 +779,14 @@ class AdminCommandExecutor():
                     # Light vulnerability fix: path traversal
                     if '../' in x or x.startswith('/'):
                         continue
-                    extlist.append('%s.py' % x.strip())
+                    extlist.append('{}.py'.format(x.strip()))
         else:
             self.print('Note: create extdep.txt in the extensions folder to sequentally load modules')
         if not os.path.exists(self.extpath):
             try:
                 os.makedirs(self.extpath)
             except OSError as exc:
-                self.error('Failed to create extension directory: %s: %s' % (type(exc).__name__, exc))
+                self.error('Failed to create extension directory: {}: {}'.format(type(exc).__name__, exc))
                 return
         with os.scandir(self.extpath) as extpath:
             for file in extpath:
@@ -724,7 +794,7 @@ class AdminCommandExecutor():
                     extlist.append(file.name)
         for name in extlist:
             if not os.path.exists(os.path.join(self.extpath, name)):
-                self.error('Module file %s not found' % name)
+                self.error('Module file {} not found'.format(name))
             await self.load_extension(name.split('.')[0])
 
     def load_config(self, path: str = 'config.json') -> bool:
@@ -746,7 +816,7 @@ class AdminCommandExecutor():
                 self.config = json.loads(file.read())
             return True
         except (json.JSONDecodeError, OSError):
-            self.error("Error occurred during load of the config: \n%s" % traceback.format_exc())
+            self.error("Error occurred during load of the config: \n{}".format(traceback.format_exc()))
             return False
         except FileNotFoundError:
             self.error("Configuration file is not found")
@@ -770,7 +840,7 @@ class AdminCommandExecutor():
                 file.write(json.dumps(self.config, indent=True))
             return True
         except OSError:
-            self.error('Failed to save configuration at %s' % path)
+            self.error(f'Failed to save configuration at {path}')
             return False
 
     async def load_extension(self, name: str) -> bool:
@@ -791,28 +861,28 @@ class AdminCommandExecutor():
             if not handle()[0]:
                 return False
             if name in self.extensions:
-                self.error("Failed to load extension %s: This extension is already loaded." % name)
+                self.error(f"Failed to load extension {name}: This extension is already loaded.")
                 return False
             _path = os.path.join(self.extpath, name + '.py')
             # Light vulnerability fix: path traversal
             if '../' in _path or _path.startswith('/'):
-                self.error("Failed to load extension %s: path should not be absolute or contain \"..\"" % name)
+                self.error(f"Failed to load extension {name}: path should not be absolute or contain \"..\"")
                 return False
             spec = importlib.util.spec_from_file_location(name, _path, submodule_search_locations=[self.extpath])
             module = importlib.util.module_from_spec(spec)
             try:
                 spec.loader.exec_module(module)
                 if 'extension_init' not in module.__dict__ or 'extension_cleanup' not in module.__dict__:
-                    self.error("Cannot load %s: missing extension_init or extension_cleanup" % name)
+                    self.error(f"Cannot load {name}: missing extension_init or extension_cleanup")
                     return
                 extension = AdminCommandExtension(self, name, module, logger=self.logger)
-                self.info('Loading extension %s' % name)
+                self.info(f'Loading extension {name}')
                 await module.extension_init(extension)
                 self.extensions[name] = extension
                 self.commands.maps.insert(0, extension.commands)
                 return True
             except BaseException:
-                self.error("Failed to load extension %s:\n%s" % (name, traceback.format_exc()))
+                self.error(f"Failed to load extension {name}:\n{traceback.format_exc()}")
                 return False
 
     async def unload_extension(self, name: str, keep_dict=False) -> bool:
@@ -850,7 +920,7 @@ class AdminCommandExecutor():
                 self.commands.maps.remove(extension.commands)
                 return True
             except Exception:
-                self.error("Failed to call cleanup in %s:\n%s" % (name, traceback.format_exc()))
+                self.error(f"Failed to call cleanup in {name}:\n{traceback.format_exc()}")
                 handle(False)
                 return False
 
@@ -984,27 +1054,27 @@ class AdminCommandExecutor():
         cmdname, _, argl = cmdline.partition(' ')
         argl = argl.strip()
         if cmdname not in self.commands:
-            self.print(self.lang['nocmd'] % cmdname)
+            self.print(self.lang['nocmd'].format(cmdname))
             return
         cmd: Union[AdminCommand, None] = self.commands[cmdname]
         if cmd is None or cmd is self.disabledCmd:
-            self.print(self.lang['nocmd'] % cmdname)
+            self.print(self.lang['nocmd'].format(cmdname))
             return
         try:
             args, argl = self.parse_args(argl, cmd.args, cmd.optargs)
             if argl:
-                self.print(self.lang['toomanyargs'] % (len(cmd.args) + len(cmd.optargs), len(args) + 1))
+                self.print(self.lang['toomanyargs'].format(len(cmd.args) + len(cmd.optargs), len(args) + 1))
                 self.print(self.usage(cmdname))
             await cmd.execute(self, args)
         except NotEnoughArguments as exc:
-            self.print(self.lang['notenoughargs'] % (len(cmd.args), exc.args[0]))
+            self.print(self.lang['notenoughargs'].format(len(cmd.args), exc.args[0]))
             self.print(self.usage(cmdname))
         except InvalidArgument as exc:
-            self.print(self.lang['invalidarg'] % exc.args[0])
+            self.print(self.lang['invalidarg'].format(exc.args[0]))
             self.print(self.usage(cmdname))
         except Exception as exc:
             self.print("An exception just happened in this command, check logs or smth...")
-            self.error(self.lang['command_error'] % exc)
+            self.error(self.lang['command_error'].format(exc))
 
     def usage(self, cmdname: str, lang=True) -> str:
         """Get a formatted usage string for the command
@@ -1024,16 +1094,16 @@ class AdminCommandExecutor():
         """
         cmd = self.commands[cmdname]
         if cmd.args:
-            mandatory_args = ['<%s: %s>' % (x[1], self.types[x[0]]) for x in cmd.args]
+            mandatory_args = ['<{}: {}>'.format(x[1], self.types[x[0]]) for x in cmd.args]
         else:
             mandatory_args = ''
         if cmd.optargs:
-            optional_args = ['[%s: %s]' % (x[1], self.types[x[0]]) for x in cmd.optargs]
+            optional_args = ['[{}: {}]'.format(x[1], self.types[x[0]]) for x in cmd.optargs]
         else:
             optional_args = ''
-        usage = '%s %s %s' % (cmdname, ' '.join(mandatory_args), ' '.join(optional_args))
+        usage = '{} {} {}'.format(cmdname, ' '.join(mandatory_args), ' '.join(optional_args))
         if lang:
-            return self.lang['usage'] % (usage)
+            return self.lang['usage'].format(usage)
         else:
             return usage
 
@@ -1047,7 +1117,7 @@ class AdminCommandExecutor():
         # loop = asyncio.get_event_loop()
         # loop.add_signal_handler(2, self.ctrl_c)
         while self.prompt_dispatching:
-            inp = await self.ainput.prompt_line('%s%s ' % (self.promptheader, self.promptarrow), prompt_formats=self.prompt_format, input_formats=self.input_format)
+            inp = await self.ainput.prompt_line('{}{} '.format(self.promptheader, self.promptarrow), prompt_formats=self.prompt_format, input_formats=self.input_format)
             if not inp:
                 continue
             if self.prompt_dispatching:
@@ -1112,11 +1182,11 @@ class AdminCommandExecutor():
                         self.print(self.lang['cancelled'])
                 except InvalidArgument as exc:
                     # one of the arguments are invalid
-                    self.print(self.lang['invalidarg'] % exc.args[0])
+                    self.print(self.lang['invalidarg'].format(exc.args[0]))
                     self.tab_complete_tuple = tuple()
                 except Exception as exc:
                     # other error
-                    self.error(self.lang['tab_error'] % str(exc))
+                    self.error(self.lang['tab_error'].format(str(exc)))
                     self.tab_complete_tuple = tuple()
             self.tab_complete_lastinp = whole_inp
             self.tab_complete_cursor = self.ainput.cursor
@@ -1198,11 +1268,11 @@ class FakeAsyncRawInput():
     def add_keystroke(self, keystroke: str, awaitable):
         """Add a key press event"""
         # I don't support that either...
-        self.ace.log("add_keystroke: attempt to add a keystroke %s handler, which is not supported by a fake ARI." % repr(keystroke))
+        self.ace.log(f"add_keystroke: attempt to add a keystroke {repr(keystroke)} handler, which is not supported by a fake ARI.")
 
     def remove_keystroke(self, keystroke: str):
         """Remove key press event"""
-        self.ace.log("remove_keystroke: attempt to remove a keystroke %s handler, which is not supported by a fake ARI." % repr(keystroke))
+        self.ace.log(f"remove_keystroke: attempt to remove a keystroke {repr(keystroke)} handler, which is not supported by a fake ARI.")
 
     def write(self, msg: str, **formats):
         """Send raw data without end of line"""
@@ -1278,9 +1348,9 @@ def basic_command_set(ACE: AdminCommandExecutor):
             if cmd in cmdnorepeat:
                 continue
             cmdnorepeat.append(cmd)
-            usagedesc.append('| %s -> %s' % (self.usage(cmdname, False), cmd.description))
+            usagedesc.append('| {} -> {}'.format(self.usage(cmdname, False), cmd.description))
         maxpage, list_ = paginate_list(usagedesc, 6, cpage)
-        self.print(('Help (page %s out of %s)\n' % (cpage, maxpage)) + '\n'.join(list_))
+        self.print(self.lang['help_cmd'].format(cpage, maxpage, '\n'.join(list_)))
     commands_['help'] = commands_['?'] = \
         AdminCommand(help_, 'help', [], [(int, 'page')], 'Show all commands')
 
@@ -1288,7 +1358,7 @@ def basic_command_set(ACE: AdminCommandExecutor):
         ls = list(self.extensions.keys())
         maxpage, pgls = paginate_list(ls, 7, cpage)
         cpage = max(min(maxpage, cpage), 1)
-        self.print('Extensions (page %s of %s):\n%s' % (cpage, maxpage, '\n'.join(pgls)))
+        self.print(self.lang['extensions_cmd'].format(cpage, maxpage, '\n'.join(pgls)))
     commands_['extlist'] = \
         commands_['extls'] = \
         commands_['lsext'] = \
@@ -1298,10 +1368,10 @@ def basic_command_set(ACE: AdminCommandExecutor):
 
     async def extload(self: AdminCommandExecutor, name: str):
         if not await self.load_extension(name):
-            self.print("%s failed to load." % name)
+            self.print(self.lang['extension_fail'].format(name))
             return
         else:
-            self.print("%s loaded." % name)
+            self.print(self.lang['extension_loaded'].format(name))
     commands_['extload'] = \
         commands_['extensionload'] = \
         commands_['loadextension'] = \
@@ -1310,11 +1380,11 @@ def basic_command_set(ACE: AdminCommandExecutor):
     async def extunload(self: AdminCommandExecutor, name: str):
         res = await self.unload_extension(name)
         if res is None:
-            self.print("%s is not loaded or non-existant extension." % name)
+            self.print(self.lang['extension_notfound'].format(name))
         elif res is False:
-            self.print("%s is unloaded but failed to cleanup." % name)
+            self.print(self.lang['extension_failcleanup'].format(name))
         else:
-            self.print("%s unloaded." % name)
+            self.print(self.lang['extension_unloaded'].format(name))
 
     async def extunload_tab(self: AdminCommandExecutor, *args, argl: str):
         name = args[0]
@@ -1334,16 +1404,16 @@ def basic_command_set(ACE: AdminCommandExecutor):
     async def extreload(self: AdminCommandExecutor, name: str):
         res = await self.unload_extension(name)
         if res is None:
-            self.print("%s is not loaded or non-existant extension." % name)
+            self.print(self.lang['extension_notfound'].format(name))
         elif res is False:
-            self.print("%s is unloaded but failed to cleanup." % name)
+            self.print(self.lang['extension_failcleanup'].format(name))
         else:
-            self.print("%s unloaded." % name)
+            self.print(self.lang['extension_unloaded'].format(name))
             if not await self.load_extension(name):
-                self.print("%s failed to load." % name)
+                self.print(self.lang['extension_fail'].format(name))
                 return
             else:
-                self.print("%s loaded." % name)
+                self.print(self.lang['extension_loaded'].format(name))
     commands_['extreload'] = \
         commands_['reloadext'] = \
         commands_['extrestart'] = \
@@ -1357,7 +1427,7 @@ def basic_command_set(ACE: AdminCommandExecutor):
 
     async def date(self: AdminCommandExecutor):
         date = datetime.datetime.now()
-        self.print("It's %s.%s.%s-%s:%s:%s right now" % (date.day, date.month, date.year, date.hour, date.minute, date.second))
+        self.print(date.strftime(self.lang['datetime_fmt']))
     commands_['date'] = AdminCommand(date, 'date', [], [], 'Show current date')
 
     async def error(self: AdminCommandExecutor):
@@ -1371,9 +1441,9 @@ def basic_command_set(ACE: AdminCommandExecutor):
         _len = len(args)
         if argl:
             _len += 1
-        self.print('Arguments: (%s)' % ', '.join(str(x) for x in args))
-        self.print('Argument amount: %d' % _len)
-        self.print('Remnant: "%s"' % argl)
+        self.print('Arguments: ({})'.format(', '.join(str(x) for x in args)))
+        self.print(f'Argument amount: {_len}')
+        self.print(f'Remnant: "{argl}"')
         if _len <= 1:
             return "example", "another", "main", "obsolete"
         elif _len == 2:
