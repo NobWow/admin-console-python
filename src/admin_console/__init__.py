@@ -29,6 +29,7 @@ import datetime
 import logging
 import re
 import warnings
+from enum import IntEnum, EnumMeta
 from math import ceil, prod
 from typing import Union, Sequence, MutableSequence, Tuple, Mapping, MutableMapping, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
 from collections import ChainMap, defaultdict
@@ -149,8 +150,29 @@ class BaseDiscreteScale(int, CustomType):
         return self._step
 
 
-class EnumType(BaseDiscreteScale):
-    """Base class for defining a discrete scale of certain objects (e.g. words, literal phrases)"""
+class FixedEnumType(BaseDiscreteScale):
+    """
+    Base class for defining a discrete scale of constant certain objects (e.g. words, literal phrases)
+    This class must be subclassed with self._enum of type IntEnum, An enum must be ordered and start from 0.
+    If an enum starts from a number other than 0, specify keyword start_at with
+    super().__init__(self, value: str, *args, start_at=N)
+    """
+
+    def __init__(self, value: str, *args, start_at: int = 0, **kwargs):
+        self._enum: EnumMeta
+        self._enuminstance: IntEnum = getattr(self._enum, value)
+        self._value = self._enuminstance.value
+        self._min = start_at
+        self._max = max(len(self._enum) - 1 + start_at, self._value)
+
+    def getEnum(self):
+        return self._enuminstance
+
+    def _startswith_predicate(self, item: IntEnum):
+        return self._enuminstance.name.startswith(item.name)
+
+    def tabComplete(self, value: str):
+        return tuple(filter(self._startswith_predicate, iter(self._enum)))
 
 
 class BaseContinuousScale(float, CustomType):
@@ -179,8 +201,80 @@ class BaseContinuousScale(float, CustomType):
         return self._max
 
 
+class DateType(CustomType):
+    date_expr = re.compile(
+        r"(?P<year>\d{4})(?P<date_delimiter>[/.\-_ ])(?P<month>\d{1,2})(?P=date_delimiter)(?P<day>\d{1,2})"
+    )
+    date_reverse_expr = "%Y/%m/%d"
+
+    def __init__(self, value: str, *, raise_exc=True, from_date: Optional[datetime.date] = None):
+        if from_date is not None:
+            self._value = from_date
+        else:
+            self._value = self.parse(value, raise_exc=raise_exc)
+
+    def parse(self, value: str, *, raise_exc=True):
+        _data = self.date_expr.fullmatch(value)
+        return datetime.date(
+            year=(int(_data.group('year')) if _data.group('year') is not None else 0),
+            month=(int(_data.group('month')) if _data.group('month') is not None else 0),
+            day=(int(_data.group('day')) if _data.group('day') is not None else 0)
+        )
+
+    def tabComplete(self, value: str):
+        return (value + datetime.datetime.utcnow().strftime(self.date_reverse_expr)[len(value):], )
+
+
+class TimeType(CustomType):
+    time_expr = re.compile(
+        r"(?P<hour>\d{1,2})(?P<time_delimiter>[:.\-_ ])(?P<minute>\d{1,2})(?:(?P=time_delimiter)(?P<second>\d{1,2}))?"
+    )
+    time_reverse_expr = "%H:%M:%S"
+
+    def __init__(self, value: str, *, raise_exc=True, from_time: Optional[datetime.time] = None):
+        if from_time is not None:
+            self._value = from_time
+        else:
+            self._value = self.parse(value, raise_exc=raise_exc)
+
+    def parse(self, value: str, *, raise_exc=True):
+        _data = self.time_expr.fullmatch(value)
+        return datetime.time(
+            hour=(int(_data.group('hour')) if _data.group('hour') is not None else 0),
+            minute=(int(_data.group('minute')) if _data.group('minute') is not None else 0),
+            second=(int(_data.group('second')) if _data.group('second') is not None else 0)
+        )
+
+    def tabComplete(self, value: str):
+        return (value + datetime.datetime.utcnow().strftime(self.time_reverse_expr)[len(value):], )
+
+
 class DateTimeType(CustomType):
-    pass
+    datetime_expr = re.compile(
+        f"(?:{DateType.date_expr.pattern})?(?: *|[._+-]?)"
+        f"(?:{TimeType.time_expr.pattern})?"
+    )
+    datetime_reverse_expr = f"{DateType.date_reverse_expr}_{TimeType.time_reverse_expr}"
+
+    def __init__(self, value: str, *, raise_exc=True, from_datetime: Optional[datetime.datetime] = None):
+        if from_datetime is not None:
+            self._value = from_datetime
+        else:
+            self._value = self.parse(value, raise_exc=raise_exc)
+
+    def parse(self, value: str, *, raise_exc=True):
+        _data = self.datetime_expr.fullmatch(value)
+        return datetime.datetime(
+            year=(int(_data.group('year')) if _data.group('year') is not None else 0),
+            month=(int(_data.group('month')) if _data.group('month') is not None else 0),
+            day=(int(_data.group('day')) if _data.group('day') is not None else 0),
+            hour=(int(_data.group('hour')) if _data.group('hour') is not None else 0),
+            minute=(int(_data.group('minute')) if _data.group('minute') is not None else 0),
+            second=(int(_data.group('second')) if _data.group('second') is not None else 0)
+        )
+
+    def tabComplete(self, value: str):
+        return (value + datetime.datetime.utcnow().strftime(self.datetime_reverse_expr)[len(value):], )
 
 
 class DurationType(CustomType):
@@ -209,8 +303,8 @@ class DurationType(CustomType):
     def __init__(self, value: Optional[str] = None, *, raise_exc=True, from_timedelta: datetime.timedelta = None):
         if from_timedelta is not None:
             self._value = from_timedelta
-            return
-        self._value = self.parse(value, raise_exc=raise_exc)
+        else:
+            self._value = self.parse(value, raise_exc=raise_exc)
 
     @classmethod
     def parse(cls, value: str, *, raise_exc=True):
@@ -368,9 +462,9 @@ class AdminCommand():
                 handle(False)
                 raise
 
-    async def tab_complete(self, executor, args: Sequence[object], argl: str = '') -> Union[Sequence[str], None]:
+    async def tab_complete(self, executor, args: Sequence[object], argl: str = '') -> Union[MutableSequence[str], None]:
         """Shouldn't be overriden, use atabcomplete to assign a tab complete handler"""
-        async with executor.cmdtab_event.emit_and_handle(self, executor, args) as handle:
+        async with executor.cmdtab_event.emit_and_handle(self, executor, args, argl=argl, atabcomplete=self.atabcomplete) as handle:
             if self.atabcomplete is not None:
                 try:
                     _res, _args, _kwargs = handle()
@@ -575,19 +669,24 @@ class AdminCommandExecutor():
         Formatting of the user input in terminal
     self.tab_complete_lastinp = ''
         Contains last input on last tabcomplete call
-    self.tab_complete_tuple = tuple()
+    self.tab_complete_seq = tuple()
         Contains last argument suggestions on tab complete call
     self.tab_complete_id = 0
-        Contains currently cycled element ID in self.tab_complete_tuple
+        Contains currently cycled element ID in self.tab_complete_seq
 
     Events
     self.events : collections.defaultdict(AIOHandlerChain)
         Main pool of events. Can be used to store custom events.
+    self.tab_event : AIOHandlerChain
+        Arguments: (executor: Union[AdminCommandExecutor, AdminCommandEWrapper], suggestions: MutableSequence[str])
+        Emits when user hits the TAB key without full command. Cancellable
+        Event handlers must modify the suggestions list if needed. Otherwise, if event emission fails,
+        this list is cleared and no results are shown
     self.cmdexec_event : AIOHandlerChain
         Arguments: (cmd: AdminCommand, executor: Union[AdminCommandExecutor, AdminCommandEWrapper], args: Sequence[Any])
         Emits when a command is executed through specific executor and with parsed arguments. Cancellable.
     self.cmdtab_event : AIOHandlerChain
-        Arguments: (cmd: AdminCommand, executor: Union[AdminCommandExecutor, AdminCommandEWrapper], args: Sequence[Any])
+        Arguments: (cmd: AdminCommand, executor: Union[AdminCommandExecutor, AdminCommandEWrapper], args: Sequence[Any], *, argl: str = "")
         Keyword arguments are received from handlers: {'override': Sequence[str]}
         Emits when TAB key is pressed with this command. Arguments are parsed until the text cursor.
         Cancellable. Set 'override' in keyword argument dictionary to explicitly set the list of suggested strings.
@@ -649,12 +748,13 @@ class AdminCommandExecutor():
         self.logger = logger
         self.tab_complete_lastinp = ''
         self.tab_complete_cursor: Optional[int] = None
-        self.tab_complete_tuple: Sequence[str] = tuple()
+        self.tab_complete_seq: Union[Sequence[str], MutableSequence[str]] = tuple()
         self.tab_complete_slices: MutableSequence[re.Match] = []
         self.tab_complete_argsfrom: Optional[int] = None
         self.tab_complete_id = 0
         # events
         self.events = defaultdict(lambda: AIOHandlerChain())
+        self.events['tab_event'] = self.tab_event = AIOHandlerChain()
         self.events['cmdadd_event'] = self.cmdadd_event = AIOHandlerChain(cancellable=False)
         self.events['cmdrm_event'] = self.cmdrm_event = AIOHandlerChain(cancellable=False)
         self.events['cmdexec_event'] = self.cmdexec_event = AIOHandlerChain()
@@ -771,8 +871,11 @@ class AdminCommandExecutor():
             self.ainput.writeln('{}: {}'.format(levels[level], msg))
 
     async def load_extensions(self):
-        """Loads extensions from an extension directory specified in AdminCommandExecutor.extpath"""
+        """
+        Loads extensions from an extension directory specified in AdminCommandExecutor.extpath
+        """
         extlist = []
+        _initpy = '__init__.py'
         if os.path.exists(os.path.join(self.extpath, 'extdep.txt')):
             with open(os.path.join(self.extpath, 'extdep.txt'), 'r') as f:
                 for x in f.readlines():
@@ -790,11 +893,11 @@ class AdminCommandExecutor():
                 return
         with os.scandir(self.extpath) as extpath:
             for file in extpath:
-                if file.name.endswith('.py') and file.is_file() and file.name not in extlist:
+                if file.name.endswith('.py') and file.is_file() and file.name not in extlist and file.name != _initpy:
                     extlist.append(file.name)
         for name in extlist:
             if not os.path.exists(os.path.join(self.extpath, name)):
-                self.error('Module file {} not found'.format(name))
+                self.error(f'Module file {name} not found')
             await self.load_extension(name.split('.')[0])
 
     def load_config(self, path: str = 'config.json') -> bool:
@@ -856,33 +959,54 @@ class AdminCommandExecutor():
         -------
         bool
             Success
+
+        Note
+        ----
+        Due to the Python's importlib limitation, extensions cannot "import" other extensions properly
+        and that way can't be implemented in any non-destructible way. Temporary modifying sys.modules
+        may cause interference between multiple ACE instances (possible name collisions in
+        sys.modules) and race conditions in multithreaded application.
+        The only way one extension can make use of another is through AdminCommandExecutor.extensions['name'].*
+        Extension objects must not be stored anywhere except by the AdminCommandExecutor owning it.
+        Otherwise the garbage collection won't work and the extension wouldn't unload properly.
         """
         async with self.extload_event.emit_and_handle(name, before=False) as handle:
             if not handle()[0]:
                 return False
             if name in self.extensions:
                 self.error(f"Failed to load extension {name}: This extension is already loaded.")
+                handle(False)
                 return False
             _path = os.path.join(self.extpath, name + '.py')
             # Light vulnerability fix: path traversal
-            if '../' in _path or _path.startswith('/'):
+            if '../' in _path or os.path.isabs(_path):
                 self.error(f"Failed to load extension {name}: path should not be absolute or contain \"..\"")
+                handle(False)
                 return False
-            spec = importlib.util.spec_from_file_location(name, _path, submodule_search_locations=[self.extpath])
+            _modulename = os.path.relpath(os.path.join(self.extpath, name)).replace(os.sep, '.')
+            # if _modulename in sys.modules:
+            #     self.error(f"Failed to load extension {name}: module already exists in the Python interpreter. "
+            #                "Make sure that the extension path isn't shared between multiple AdminCommandExecutor instances")
+            #     handle(False)
+            #     return False
+            spec = importlib.util.spec_from_file_location(_modulename, _path, submodule_search_locations=[self.extpath])
             module = importlib.util.module_from_spec(spec)
             try:
                 spec.loader.exec_module(module)
                 if 'extension_init' not in module.__dict__ or 'extension_cleanup' not in module.__dict__:
                     self.error(f"Cannot load {name}: missing extension_init or extension_cleanup")
+                    handle(False)
                     return
                 extension = AdminCommandExtension(self, name, module, logger=self.logger)
                 self.info(f'Loading extension {name}')
                 await module.extension_init(extension)
                 self.extensions[name] = extension
                 self.commands.maps.insert(0, extension.commands)
+                # sys.modules[_modulename] = module
                 return True
-            except BaseException:
+            except Exception:
                 self.error(f"Failed to load extension {name}:\n{traceback.format_exc()}")
+                handle(False)
                 return False
 
     async def unload_extension(self, name: str, keep_dict=False) -> bool:
@@ -918,6 +1042,10 @@ class AdminCommandExecutor():
                 del self.extensions[name]
                 await extension.module.extension_cleanup(extension)
                 self.commands.maps.remove(extension.commands)
+                # _name = extension.module.__name__
+                # if _name in sys.modules:
+                #     if sys.modules[_name] == extension:
+                #         del sys.modules[_name]
                 return True
             except Exception:
                 self.error(f"Failed to call cleanup in {name}:\n{traceback.format_exc()}")
@@ -1039,7 +1167,7 @@ class AdminCommandExecutor():
         return args, remnant
 
     async def dispatch(self, cmdline: str) -> bool:
-        """Executes a command. Shouldn't be used explicitly. Use prompt_loop() instead.
+        """Executes a command. Shouldn't be used explicitly with input(). Use prompt_loop() instead.
 
         Parameters
         ----------
@@ -1139,6 +1267,12 @@ class AdminCommandExecutor():
         for extension in tuple(self.extensions.keys()):
             await self.unload_extension(extension)
 
+    async def _tab_predicate(self, cmdname: str) -> bool:
+        """
+        Must return True if this command can be tabcompleted
+        """
+        return True
+
     async def _tab_complete(self):
         """This is callback function for TAB key event
            Uses AsyncRawInput data to handle the text update
@@ -1155,12 +1289,17 @@ class AdminCommandExecutor():
             self.tab_complete_argsfrom = len(cmdname) + 1
             if not sep:
                 # generate list of command suggestions
-                self.tab_complete_tuple = []
+                self.tab_complete_seq = []
                 for cmdname in self.commands:
-                    if cmdname.startswith(inp_beginning) and self.commands[cmdname] is not self.disabledCmd:
-                        self.tab_complete_tuple.append(cmdname)
-                self.tab_complete_id = 0
-                self.ainput.writeln('\t'.join(self.tab_complete_tuple), fgcolor=colors.GREEN)
+                    if cmdname.startswith(inp_beginning) and self.commands[cmdname] is not self.disabledCmd and (await self._tab_predicate(cmdname)):
+                        self.tab_complete_seq.append(cmdname)
+                async with self.tab_event.emit_and_handle(self, self.tab_complete_seq) as handle:
+                    _res, _args, _kwargs = handle()
+                    if _res and self.tab_complete_seq:
+                        self.ainput.writeln('\t'.join(self.tab_complete_seq), fgcolor=colors.GREEN)
+                        self.tab_complete_id = 0
+                    elif self.tab_complete_seq:
+                        self.tab_complete_seq.clear()
             else:
                 argl = argl.lstrip()
                 if cmdname not in self.commands:
@@ -1173,9 +1312,9 @@ class AdminCommandExecutor():
                                                  saved_matches=self.tab_complete_slices,
                                                  until=self.ainput.cursor - self.tab_complete_argsfrom)
                     suggestions = await cmd.tab_complete(self, args, argl)
-                    if suggestions is not None:
+                    if suggestions is not None and suggestions:
                         self.ainput.writeln('\t'.join(suggestions), fgcolor=colors.GREEN)
-                    self.tab_complete_tuple = suggestions
+                    self.tab_complete_seq = suggestions
                     self.tab_complete_id = 0
                 except asyncio.CancelledError:
                     if self.prompt_dispatching:
@@ -1183,18 +1322,18 @@ class AdminCommandExecutor():
                 except InvalidArgument as exc:
                     # one of the arguments are invalid
                     self.print(self.lang['invalidarg'].format(exc.args[0]))
-                    self.tab_complete_tuple = tuple()
+                    self.tab_complete_seq = tuple()
                 except Exception as exc:
                     # other error
                     self.error(self.lang['tab_error'].format(str(exc)))
-                    self.tab_complete_tuple = tuple()
+                    self.tab_complete_seq = tuple()
             self.tab_complete_lastinp = whole_inp
             self.tab_complete_cursor = self.ainput.cursor
-        elif self.tab_complete_tuple:
+        elif self.tab_complete_seq:
             # cycle through the suggestions
-            self.tab_complete_id = (self.tab_complete_id + 1) % len(self.tab_complete_tuple)
+            self.tab_complete_id = (self.tab_complete_id + 1) % len(self.tab_complete_seq)
         # replace the n-th argument
-        if self.tab_complete_tuple:
+        if self.tab_complete_seq:
             # pick the boundaries
             _bounds, _bound_id = next(
                 dropwhile(self._cursor_boundary_predicate,
@@ -1204,7 +1343,7 @@ class AdminCommandExecutor():
             _bounds: Optional[re.Match]
             _bound_id: Optional[int]
             _, _, last_arg = inp_beginning.rpartition(' ')
-            target = self.tab_complete_tuple[self.tab_complete_id]
+            target = self.tab_complete_seq[self.tab_complete_id]
             if not last_arg:
                 # append the resulting argument
                 self.ainput.read_lastinp.extend(target)
