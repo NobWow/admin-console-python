@@ -53,6 +53,13 @@ class CustomType:
         """
         return self._value
 
+    @classmethod
+    def deserialize(cls, data):
+        """
+        Construct an object from this raw data
+        """
+        raise NotImplementedError
+
     def tabComplete(self, value: str):
         """
         Return a tuple containing all available items from a starting value
@@ -245,6 +252,9 @@ class TimeType(CustomType):
             second=(int(_data.group('second')) if _data.group('second') is not None else 0)
         )
 
+    def serialize(self):
+        return self._value.second() + self._value.minute() * 60 + self._value.hour() * 3600
+
     def tabComplete(self, value: str):
         return (value + datetime.datetime.utcnow().strftime(self.time_reverse_expr)[len(value):], )
 
@@ -272,6 +282,13 @@ class DateTimeType(CustomType):
             minute=(int(_data.group('minute')) if _data.group('minute') is not None else 0),
             second=(int(_data.group('second')) if _data.group('second') is not None else 0)
         )
+
+    def serialize(self):
+        return int(self._value.timestamp())
+
+    @classmethod
+    def deserialize(cls, timestamp: int):
+        return cls(from_datetime=datetime.datetime.fromtimestamp(float(timestamp)))
 
     def tabComplete(self, value: str):
         return (value + datetime.datetime.utcnow().strftime(self.datetime_reverse_expr)[len(value):], )
@@ -323,7 +340,11 @@ class DurationType(CustomType):
         )
 
     def serialize(self):
-        return self._value.total_seconds()
+        return self._value / datetime.timedelta(microseconds=1)
+
+    @classmethod
+    def deserialize(cls, usec: int):
+        return cls(from_timedelta=datetime.timedelta(microseconds=usec))
 
 
 def parse_escapes(inp: str):
@@ -534,7 +555,7 @@ class AdminCommandExtension():
         """
         return False
 
-    def add_command(self, afunc: Callable[[Any], Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[ArgumentType, str]] = tuple(), optargs: Sequence[Tuple[ArgumentType, str]] = tuple(), description: str = '', replace=False) -> bool:
+    def add_command(self, afunc: Callable[[Any], Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[ArgumentType, str]] = tuple(), optargs: Sequence[Tuple[ArgumentType, str]] = tuple(), description: str = '', atabcomplete: Optional[Callable[[Sequence[str]], Coroutine[Any, Any, Any]]] = None, replace=False) -> bool:
         """Registers a command and adds it to the AdminCommandExecutor.
         Constructs an AdminCommand instance with all the arguments passed.
         Doesn't require sync_local_commands() to be run
@@ -555,7 +576,7 @@ class AdminCommandExtension():
             Success
         """
         asyncio.create_task(self.ace.cmdadd_event(name, args, optargs, description))
-        cmd = AdminCommand(afunc, name, args, optargs, description)
+        cmd = AdminCommand(afunc, name, args, optargs, description, atabcomplete)
         if name not in self.ace.commands or (name in self.ace.commands and replace):
             self.commands[name] = cmd
             return True
