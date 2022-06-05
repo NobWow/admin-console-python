@@ -429,7 +429,7 @@ class AdminCommand():
         afunc, name, args, optargs, description) instead
     Emits AdminCommandExecutor.cmdexec_event, AdminCommandExecutor.cmdtab_event
     """
-    def __init__(self, afunc, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]], description: str = '', atabcomplete: Optional[Callable[Sequence[str], Coroutine[Any, Any, Any]]] = None):
+    def __init__(self, afunc, name: str, args: Sequence[Tuple[ArgumentType, str]], optargs: Sequence[Tuple[ArgumentType, str]], description: str = '', atabcomplete: Optional[Callable[[str], Coroutine[Any, Any, Any]]] = None):
         """
         Parameters
         ----------
@@ -555,7 +555,7 @@ class AdminCommandExtension():
         """
         return False
 
-    def add_command(self, afunc: Callable[[Any], Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[ArgumentType, str]] = tuple(), optargs: Sequence[Tuple[ArgumentType, str]] = tuple(), description: str = '', atabcomplete: Optional[Callable[[Sequence[str]], Coroutine[Any, Any, Any]]] = None, replace=False) -> bool:
+    def add_command(self, afunc: Callable[[Any], Coroutine[Any, Any, Any]], name: str, args: Sequence[Tuple[ArgumentType, str]] = tuple(), optargs: Sequence[Tuple[ArgumentType, str]] = tuple(), description: str = '', atabcomplete: Optional[Callable[[str], Coroutine[Any, Any, Any]]] = None, replace=False) -> bool:
         """Registers a command and adds it to the AdminCommandExecutor.
         Constructs an AdminCommand instance with all the arguments passed.
         Doesn't require sync_local_commands() to be run
@@ -754,7 +754,7 @@ class AdminCommandExecutor():
         self.extensions: Dict[str, AdminCommandExtension] = {
             # 'extension name': AdminCommandExtension()
         }
-        self.full_cleanup_steps: Set[Callable[Any, Coroutine[Any, Any, Any]]] = set(
+        self.full_cleanup_steps: Set[Callable[[Any], Coroutine[Any, Any, Any]]] = set(
             # coroutine functions
         )
         self.extpath = extension_path
