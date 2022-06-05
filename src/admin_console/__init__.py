@@ -485,7 +485,7 @@ class AdminCommand():
 
     async def tab_complete(self, executor, args: Sequence[object], argl: str = '') -> Union[MutableSequence[str], None]:
         """Shouldn't be overriden, use atabcomplete to assign a tab complete handler"""
-        async with executor.cmdtab_event.emit_and_handle(self, executor, args, {'argl': argl}, atabcomplete=self.atabcomplete) as handle:
+        async with executor.cmdtab_event.emit_and_handle(self, executor, args, {'argl': argl, 'atabcomplete': self.atabcomplete}) as handle:
             if self.atabcomplete is not None:
                 try:
                     _res, _args, _kwargs = handle()
