@@ -36,6 +36,7 @@ from collections import ChainMap, defaultdict
 from aiohndchain import AIOHandlerChain
 from itertools import count as itercount
 from itertools import chain, repeat, dropwhile, islice
+from functools import partial
 
 
 class CustomType:
@@ -57,13 +58,14 @@ class CustomType:
         """
         return str(self._rawvalue)
 
-    def getTypeName(self, ace) -> str:
+    @classmethod
+    def getTypeName(cls, ace) -> str:
         """
         Obtain a name for this type that is used in command usage
         Name is obtained from AdminCommandExecutor.lang first, then from
         self._typename if not found in former
         """
-        return ace.lang.get(type(self), self._typename)
+        return ace.lang.get(cls, cls._typename)
 
     def serialize(self) -> Union[str, int, float, bool, None]:
         """
@@ -79,7 +81,8 @@ class CustomType:
         """
         raise NotImplementedError
 
-    def tabComplete(self, value: Optional[str] = None):
+    @classmethod
+    def tabComplete(cls, value: Optional[str] = None) -> MutableSequence[str]:
         """
         Returns a list containing all available items from a starting value
         Can be async
@@ -165,29 +168,34 @@ class BaseDiscreteScale(int, CustomType):
     def getValue(self) -> int:
         return self._value
 
+    @classmethod
     def getTypeName(self, cmd) -> str:
         return super(CustomType).getTypeName(cmd).format(self.getMin(), self.getMax())
 
-    def getMin(self) -> int:
+    @classmethod
+    def getMin(cls) -> int:
         """Returns the lowest point of a scale"""
-        return self._min
+        return cls._min
 
-    def getMax(self) -> int:
+    @classmethod
+    def getMax(cls) -> int:
         """Returns the highest point of a scale"""
-        return self._max
+        return cls._max
 
-    def getStep(self) -> int:
+    @classmethod
+    def getStep(cls) -> int:
         """Returns the distance between each elements"""
-        return self._step
+        return cls._step
 
-    def tabComplete(self, value: Optional[str] = None):
-        return list(range(self.getMin(), self.getMax() + 1, self.getStep()))
+    @classmethod
+    def tabComplete(cls, value: Optional[str] = None):
+        return list(range(cls.getMin(), cls.getMax() + 1, cls.getStep()))
 
 
 class FixedEnumType(BaseDiscreteScale):
     """
     Base class for defining a discrete scale of constant certain objects (e.g. words, literal phrases)
-    This class must be subclassed with self._enum of type IntEnum, An enum must be ordered and start from 0.
+    This class must be subclassed with cls._enum of type IntEnum, An enum must be ordered and start from 0.
     If an enum starts from a number other than 0, specify keyword start_at with
     super().__init__(self, value: str, *args, start_at=N)
     """
@@ -209,11 +217,13 @@ class FixedEnumType(BaseDiscreteScale):
     def getRawValue(self):
         return self._enuminstance.name
 
-    def _startswith_predicate(self, item: IntEnum):
-        return self._enuminstance.name.startswith(item.name)
+    @staticmethod
+    def _startswith_predicate(value: str, item: IntEnum):
+        return item.name.startswith(value)
 
-    def tabComplete(self, value: str):
-        return tuple(filter(self._startswith_predicate, iter(self._enum)))
+    @classmethod
+    def tabComplete(cls, value: str):
+        return list(filter(partial(cls._startswith_predicate, value), iter(cls._enum)))
 
 
 class BaseContinuousScale(float, CustomType):
@@ -237,16 +247,19 @@ class BaseContinuousScale(float, CustomType):
     def getValue(self) -> float:
         return self._value
 
-    def getTypeName(self, ace) -> str:
-        return super(CustomType).getTypeName(ace).format(self.getMin(), self.getMax())
+    @classmethod
+    def getTypeName(cls, ace) -> str:
+        return cls.getTypeName(ace).format(cls.getMin(), cls.getMax())
 
-    def getMin(self) -> float:
+    @classmethod
+    def getMin(cls) -> float:
         """Returns the lowest point of a scale"""
-        return self._min
+        return cls._min
 
-    def getMax(self) -> float:
+    @classmethod
+    def getMax(cls) -> float:
         """Returns the highest point of a scale"""
-        return self._max
+        return cls._max
 
 
 class DateType(CustomType):
@@ -262,16 +275,18 @@ class DateType(CustomType):
         else:
             self._value = self.parse(value, raise_exc=raise_exc)
 
-    def parse(self, value: str, *, raise_exc=True):
-        _data = self.date_expr.fullmatch(value)
+    @classmethod
+    def parse(cls, value: str, *, raise_exc=True):
+        _data = cls.date_expr.fullmatch(value)
         return datetime.date(
             year=(int(_data.group('year')) if _data.group('year') is not None else 0),
             month=(int(_data.group('month')) if _data.group('month') is not None else 0),
             day=(int(_data.group('day')) if _data.group('day') is not None else 0)
         )
 
-    def tabComplete(self, value: str):
-        return (value + datetime.datetime.utcnow().strftime(self.date_reverse_expr)[len(value):], )
+    @classmethod
+    def tabComplete(cls, value: str):
+        return [value + datetime.datetime.utcnow().strftime(cls.date_reverse_expr)]
 
 
 class TimeType(CustomType):
@@ -287,8 +302,9 @@ class TimeType(CustomType):
         else:
             self._value = self.parse(value, raise_exc=raise_exc)
 
-    def parse(self, value: str, *, raise_exc=True):
-        _data = self.time_expr.fullmatch(value)
+    @classmethod
+    def parse(cls, value: str, *, raise_exc=True):
+        _data = cls.time_expr.fullmatch(value)
         return datetime.time(
             hour=(int(_data.group('hour')) if _data.group('hour') is not None else 0),
             minute=(int(_data.group('minute')) if _data.group('minute') is not None else 0),
@@ -307,8 +323,8 @@ class TimeType(CustomType):
         _r %= 60
         return cls(from_time=datetime.time(_hour, _minute, _r))
 
-    def tabComplete(self, value: str):
-        return (value + datetime.datetime.utcnow().strftime(self.time_reverse_expr)[len(value):], )
+    def tabComplete(cls, value: str):
+        return [value + datetime.datetime.utcnow().strftime(cls.time_reverse_expr)]
 
 
 class DateTimeType(CustomType):
@@ -325,8 +341,9 @@ class DateTimeType(CustomType):
         else:
             self._value = self.parse(value, raise_exc=raise_exc)
 
-    def parse(self, value: str, *, raise_exc=True):
-        _data = self.datetime_expr.fullmatch(value)
+    @classmethod
+    def parse(cls, value: str, *, raise_exc=True):
+        _data = cls.datetime_expr.fullmatch(value)
         return datetime.datetime(
             year=(int(_data.group('year')) if _data.group('year') is not None else 0),
             month=(int(_data.group('month')) if _data.group('month') is not None else 0),
@@ -343,8 +360,9 @@ class DateTimeType(CustomType):
     def deserialize(cls, timestamp: int):
         return cls(from_datetime=datetime.datetime.fromtimestamp(float(timestamp)))
 
-    def tabComplete(self, value: str):
-        return (value + datetime.datetime.utcnow().strftime(self.datetime_reverse_expr)[len(value):], )
+    @classmethod
+    def tabComplete(cls, value: str):
+        return [value + datetime.datetime.utcnow().strftime(cls.datetime_reverse_expr)]
 
 
 class DurationType(CustomType):
@@ -524,6 +542,7 @@ class AdminCommand():
         self.description = description
         self.afunc = afunc  # takes AdminCommandExecutor and custom args
         self.atabcomplete = atabcomplete
+        self.argchain = tuple(chain(args, optargs))
 
     async def execute(self, executor, args: Sequence[object]):
         """Shouldn't be overriden, use afunc to assign a functor to the command"""
@@ -546,10 +565,25 @@ class AdminCommand():
                     return _kwargs['override']
                 elif _res:
                     _len = len(args)
-                    if argl:
+                    if argl or not _len:
+                        # its when next command is tabcompleted
                         _len += 1
-                    if args:
+                        _last_type = self.argchain[_len - 1][0]
+                        if _last_type in (None, str):
+                            _last = ''
+                        elif _last_type in (int, float):
+                            _last = _last_type()
+                        elif issubclass(_last_type, CustomType):
+                            _last = None
+                        _rlast = ''
+                    else:
+                        # already existing one
+                        _last_type = self.argchain[_len - 1][0]
                         _last = args[-1]
+                        if isinstance(_last, (int, float, str, bool)):
+                            _rlast = str(_last)
+                        elif isinstance(_last, CustomType):
+                            _rlast = str(_last.getRawValue())
                     if self.atabcomplete is not None:
                         if asyncio.iscoroutinefunction(self.atabcomplete):
                             _res = await self.atabcomplete(executor, *args, argl=argl)
@@ -559,14 +593,12 @@ class AdminCommand():
                             _res = self.atabcomplete(executor, *args, argl=argl)
                             if _res:
                                 return _res
-                    if isinstance(_last, CustomType):
-                        _last: CustomType
+                    if issubclass(_last_type, CustomType):
                         # attempt to tabcomplete that one
-                        if asyncio.iscoroutinefunction(_last.tabComplete):
-                            # TODO
-                            return await _last.tabComplete(str(_last.getRawValue()))
+                        if asyncio.iscoroutinefunction(_last_type.tabComplete):
+                            return await _last_type.tabComplete(_rlast)
                         else:
-                            return _last.tabComplete(str(_last.getRawValue()))
+                            return _last_type.tabComplete(_rlast)
             except Exception:
                 handle(False)
                 raise
