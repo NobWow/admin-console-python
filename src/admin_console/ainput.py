@@ -18,7 +18,7 @@ import io
 import re
 
 # implementing logging handler
-from logging import Handler, NOTSET, LogRecord, getLogger, Formatter
+from logging import Handler, NOTSET, LogRecord, Formatter, getLogger
 from logging import DEBUG, INFO, WARNING, ERROR, CRITICAL
 
 
@@ -164,7 +164,7 @@ class AsyncRawInput():
         Current position of the user terminal cursor.
     self.echo : bool = True
         Whether or not the user input is shown on the terminal. Don't modify it manually
-    self.ctrl_c : async function
+    self.ctrl_c : (async) function
         Async callback that is called when Ctrl + C is pressed in the terminal
     self.keystrokes : dict
         Mapping of keystroke handlers.
@@ -230,20 +230,21 @@ class AsyncRawInput():
         self.is_reading = False
         self.prepared = False
 
-    def set_interrupt_handler(self, awaitable):
+    def get_interrupt_handler(self) -> Callable[[Any], Coroutine[Any, Any, Any]]:
+        return self.ctrl_c
+
+    def set_interrupt_handler(self, callback):
         """
         Sets the callback for Ctrl + C keystroke
 
         Parameters
         ----------
-        awaitable : coroutine function
-            async callback, called without arguments
+        callback : coroutine or regular function
+            (async) callback, called without arguments
         """
-        if not asyncio.iscoroutinefunction(awaitable):
-            raise TypeError('awaitable should be a coroutine function')
-        self.ctrl_c = awaitable
+        self.ctrl_c = callback
 
-    def add_keystroke(self, keystroke: str, awaitable):
+    def add_keystroke(self, keystroke: str, asyncfunction):
         """
         Add a new keystroke to the terminal
 
@@ -251,10 +252,10 @@ class AsyncRawInput():
         ----------
         keystroke : str
             Raw keystroke code. For example, tab keystroke will be: "\\t", Ctrl + F will be "\\x06"
-        awaitable : async function
+        asyncfunction : async function
             Async callback called without arguments
         """
-        self.keystrokes[keystroke] = awaitable
+        self.keystrokes[keystroke] = asyncfunction
 
     def remove_keystroke(self, keystroke: str):
         """
@@ -413,8 +414,10 @@ class AsyncRawInput():
                             # Ctrl + C
                             if self.ctrl_c is None:
                                 raise RuntimeError('Ctrl + C is not handled')
-                            else:
+                            elif asyncio.iscoroutinefunction(self.ctrl_c):
                                 await self.ctrl_c()
+                            else:
+                                self.ctrl_c()
                         elif ord(key[0]) == 13 or ord(key[0]) == 10:
                             # submit the input
                             break
@@ -500,7 +503,7 @@ class AsyncRawInput():
             self.stdout.flush()
             self.is_reading = False
 
-    async def prompt_keystroke(self, prompt=': ', echo=True):
+    async def prompt_keystroke(self, prompt=': ', echo=True) -> str:
         """
         Start reading a single character from a terminal. Not handling the keystrokes.
 
@@ -510,6 +513,11 @@ class AsyncRawInput():
             The text that is displayed before user input
         echo : bool
             Whether or not a user input will be displayed.
+
+        Returns
+        -------
+        str
+            Resulting pressed keystroke
         """
         backup_inputformats = self.input_formats
         backup_promptformats = self.prompt_formats
@@ -597,14 +605,18 @@ async def _log_testing(inp: AsyncRawInput, amount: int):
     """
     This is debug function for custom log handler testing
     """
-    logger = getLogger("main")
+    logger = getLogger("ranmame")
     logger.setLevel(INFO)
     handler = ARILogHandler(inp)
     formatter = Formatter("%(asctime)s [%(levelname)s] %(message)s")
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+    sublog = logger.getChild('testeng')
+    sublog.propagate = True
+    # sublog.addHandler(NullHandler())
     for i in range(amount):
         logger.log((DEBUG, INFO, WARNING, ERROR)[i % 4], "This is a debug log!")
+        sublog.log((INFO, WARNING, ERROR)[i % 3], "This is sublog!")
         await asyncio.sleep(1)
 
 
