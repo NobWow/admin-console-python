@@ -206,6 +206,9 @@ class FixedEnumType(BaseDiscreteScale):
         """
         return self._enuminstance
 
+    def getRawValue(self):
+        return self._enuminstance.name
+
     def _startswith_predicate(self, item: IntEnum):
         return self._enuminstance.name.startswith(item.name)
 
@@ -547,15 +550,23 @@ class AdminCommand():
                         _len += 1
                     if args:
                         _last = args[-1]
-                    if args or argl:
-                        if self.atabcomplete is not None:
-                            return await self.atabcomplete(executor, *args, argl=argl)
-                        if isinstance(_last, CustomType):
-                            _last: CustomType
-                            # attempt to tabcomplete that one
-                            if asyncio.iscoroutinefunction(_last.tabComplete):
-                                # TODO
-                                return await _last.tabComplete()
+                    if self.atabcomplete is not None:
+                        if asyncio.iscoroutinefunction(self.atabcomplete):
+                            _res = await self.atabcomplete(executor, *args, argl=argl)
+                            if _res:
+                                return _res
+                        else:
+                            _res = self.atabcomplete(executor, *args, argl=argl)
+                            if _res:
+                                return _res
+                    if isinstance(_last, CustomType):
+                        _last: CustomType
+                        # attempt to tabcomplete that one
+                        if asyncio.iscoroutinefunction(_last.tabComplete):
+                            # TODO
+                            return await _last.tabComplete(str(_last.getRawValue()))
+                        else:
+                            return _last.tabComplete(str(_last.getRawValue()))
             except Exception:
                 handle(False)
                 raise
