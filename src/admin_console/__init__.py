@@ -23,15 +23,16 @@ from .ainput import AsyncRawInput, colors
 import json
 import os
 import importlib
-import importlib.util
 import types
 import datetime
 import logging
 import re
 import warnings
+import sys
 from enum import IntEnum, EnumMeta
 from math import ceil, prod
 from typing import Union, Sequence, MutableSequence, Tuple, Mapping, MutableMapping, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
+from types import ModuleType
 from collections import ChainMap, defaultdict
 from aiohndchain import AIOHandlerChain
 from itertools import count as itercount
@@ -852,6 +853,7 @@ class AdminCommandExecutor():
         self.extensions: Dict[str, AdminCommandExtension] = {
             # 'extension name': AdminCommandExtension()
         }
+        self.known_modules: Dict[str, ModuleType] = {}
         self.full_cleanup_steps: Set[Callable[[Any], Coroutine[Any, Any, Any]]] = set(
             # coroutine functions
         )
@@ -1088,6 +1090,9 @@ class AdminCommandExecutor():
         The only way one extension can make use of another is through AdminCommandExecutor.extensions['name'].*
         Extension objects must not be stored anywhere except by the AdminCommandExecutor owning it.
         Otherwise the garbage collection won't work and the extension wouldn't unload properly.
+        Also, the Python module cannot be unloaded from the memory, in that particular case, the modules
+        are cached, and if the same extension loads again, its module is taken from the known_modules and
+        reloaded.
         """
         async with self.extload_event.emit_and_handle(name, before=False) as handle:
             if not handle()[0]:
@@ -1103,17 +1108,14 @@ class AdminCommandExecutor():
                 handle(False)
                 return False
             _modulename = os.path.relpath(os.path.join(self.extpath, name)).replace(os.sep, '.')
-            # if _modulename in sys.modules:
-            #     self.error(f"Failed to load extension {name}: module already exists in the Python interpreter. "
-            #                "Make sure that the extension path isn't shared between multiple AdminCommandExecutor instances")
-            #     handle(False)
-            #     return False
-            spec = importlib.util.spec_from_file_location(_modulename, _path, submodule_search_locations=[self.extpath])
-            module = importlib.util.module_from_spec(spec)
             try:
-                spec.loader.exec_module(module)
+                if _modulename in self.known_modules:
+                    module = importlib.reload(self.known_modules[_modulename])
+                else:
+                    module = importlib.import_module(_modulename)
+                    self.known_modules[_modulename] = module
                 if 'extension_init' not in module.__dict__ or 'extension_cleanup' not in module.__dict__:
-                    self.error(f"Cannot load {name}: missing extension_init or extension_cleanup")
+                    self.error(f"Cannot initialize {name}: missing extension_init or extension_cleanup")
                     handle(False)
                     return
                 extension = AdminCommandExtension(self, name, module, logger=self.logger)
@@ -1121,7 +1123,6 @@ class AdminCommandExecutor():
                 await module.extension_init(extension)
                 self.extensions[name] = extension
                 self.commands.maps.insert(0, extension.commands)
-                # sys.modules[_modulename] = module
                 return True
             except Exception:
                 self.error(f"Failed to load extension {name}:\n{traceback.format_exc()}")
@@ -1144,6 +1145,11 @@ class AdminCommandExecutor():
         -------
         bool
             Success
+
+        Note
+        ----
+        Due to a Python limitation, it is impossible to unload a module from memory, but
+        its possible to reload them with importlib.reload()
         """
         assert self.extunload_event._lock != self.cmdexec_event._lock
         async with self.extunload_event.emit_and_handle(name, before=False) as handle:
