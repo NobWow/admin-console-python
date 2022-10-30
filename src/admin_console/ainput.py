@@ -12,6 +12,7 @@ from typing import Union, Sequence, Tuple, MutableSequence, Optional, Callable, 
 import traceback
 
 # raw mode features
+from signal import SIGWINCH
 import tty
 import termios
 import io
@@ -49,7 +50,7 @@ ansi_escape = re.compile(r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]')
 def truelen(text: str) -> int:
     """Returns amount of visible-on-terminal characters in the string"""
     nocsi = ansi_escape.sub('', text)
-    return len(''.join(x for x in nocsi if x.isprintable()))
+    return sum(x.isprintable() for x in nocsi)
 
 
 def truelen_list(seq: Sequence[str]) -> int:
@@ -191,13 +192,23 @@ class AsyncRawInput():
         self.is_reading = False
         self.stdin = stdin
         self.stdout = stdout
-        self.read_lastinp: MutableSequence[str] = []  # mutability but extra memory consumption
+        self.read_lastinp: MutableSequence[str] = []  # can only contain printable strings,
+        # ...mutability but extra memory consumption
         self.read_lastprompt = ''
         self.old_tcattrs: MutableSequence[int] = None
+        self.was_blocking: Optional[bool] = None
         self.prepared = False
         self.history = history
         self.history_limit = history_limit
         self.cursor = 0
+        self._promptline_scroll = 0  # when terminal column-size exceeded, indicates the horizontal scroll
+        # horizontal scrolling behavior:
+        # - draw only single line of input
+        # - when at least 1 character of prompt can be shown, always format it, don't skip formatting
+        # - scroll back when character is erased
+        # - do not show dots or any symbol on the edges to make sure characters fill the entire line, sorry about that
+        # - do not snap the scrolling, scroll char-by-char instead
+        # - when scroll > 0, always redraw the prompt
         self.echo = True
         self.ctrl_c = None
         self.keystrokes = {}
@@ -212,23 +223,33 @@ class AsyncRawInput():
     def prepare(self):
         """
         Enables raw mode, saving the old TTY settings. Disables blocking mode for standard input
+        Hooks up the SIGWINCH signal handler, which will redraw the prompt line if any.
         """
         if not self.prepared:
             self.old_tcattrs = termios.tcgetattr(self.stdin.fileno())
         self.prepared = True
+        self.was_blocking = os.get_blocking(self.stdin.fileno())
         os.set_blocking(self.stdin.fileno(), False)
+        self.loop.add_signal_handler(SIGWINCH, self.on_terminal_resize)
         tty.setraw(self.stdin.fileno())
+
+    def on_terminal_resize(self):
+        cols, lines = self.get_terminal_size()
+        self.move_input_cursor(self.cursor)
 
     def end(self):
         """
         Disables raw mode, restoring the old TTY settings for standard input
+        Unhooks the SIGWINCH signal handler.
         """
         if self.is_reading and self.input_formats:
             self.stdout.write(self.input_formats[1])
             self.stdout.flush()
         termios.tcsetattr(self.stdin.fileno(), termios.TCSANOW, self.old_tcattrs)
+        self.loop.remove_signal_handler(SIGWINCH)
         self.is_reading = False
         self.prepared = False
+        os.set_blocking(self.stdin.fileno(), self.was_blocking)
 
     def get_interrupt_handler(self) -> Callable[[Any], Coroutine[Any, Any, Any]]:
         return self.ctrl_c
@@ -278,7 +299,8 @@ class AsyncRawInput():
         **formats : keyword arguments
             Formatting arguments passed as format_term(**formats)
         """
-        self.stdout.write(('\r%s' + carriage_return(msg) + '%s') % format_term(**formats))
+        _formats = format_term(**formats)
+        self.stdout.write('\r' + _formats[0] + carriage_return(msg) + _formats[1])
 
     def writeln(self, msg: str, **formats):
         """
@@ -301,36 +323,98 @@ class AsyncRawInput():
             self.stdout.write('\r\33[2K')
             # write the message
             self.stdout.write('\r' + formats_tuple[0] + carriage_return(msg) + formats_tuple[1] + '\n')
-            # reprint the prompt
-            self.stdout.write('\r' + self.prompt_formats[0] + self.read_lastprompt + self.prompt_formats[1])
-            if self.echo:
-                # reprint last user input and re-enable graphic rendition for user input
-                self.stdout.write(self.input_formats[0] + ''.join(self.read_lastinp))
-                # move cursor to the last position
-                self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
-            # stdout is a toilet
-            self.stdout.flush()
+            self.redraw_lastinp(0, force_redraw_prompt=True)
         else:
             self.stdout.write('\r\33[0K' + formats_tuple[0] + carriage_return(msg) + formats_tuple[1] + '\n\r')
             self.stdout.flush()
 
-    def redraw_lastinp(self, at: int):
+    def get_terminal_size(self) -> Union[os.terminal_size, Tuple[int, int]]:
+        return os.get_terminal_size(self.stdout.fileno())
+
+    def move_cursor(self, at: int, *, flush=True, redraw=False):
         """
-        Redisplay a user prompt at specified position on current cursor line.
+        Moves the cursor across the current line.
+        Parameter at starts from 1, which means that at=1 is the first character of the terminal line
         """
-        # move cursor at redrawing part
-        self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + max(at, 1)))
-        # clear the rest
-        self.stdout.write('\33[0K')
-        # render part of user input and enable formats
-        self.stdout.write(self.input_formats[0] + ''.join(self.read_lastinp[max(at - 1, 0):]))
-        # restore cursor pos
-        self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
+        self.stdout.write('\33[%sG' % at)
+        if redraw:
+            self.redraw_lastinp(0)
+        if flush:
+            self.stdout.flush()
+
+    def move_input_cursor(self, at_char: int):
+        """
+        Sets the cursor's input position at specified character. Scrolls the input horizontally when necessary.
+        """
+        # clamped absolute position of the cursor
+        at_char = max(min(len(self.read_lastinp), at_char), 0)
+        cols, _ = self.get_terminal_size()
+        _tlen = truelen(self.read_lastprompt)
+        # N-th character is the character of the input buffer at the beginning of the line (bottom-left corner of the terminal)
+        # Can be negative which means the prompt characters
+        _tlen_scrolled = self._promptline_scroll - _tlen
+        self.cursor = at_char
+        if self.cursor == 0:
+            self._promptline_scroll = 0
+            self.move_cursor(_tlen, flush=False)
+            self.redraw_lastinp(0, force_redraw_prompt=True)
+        elif self.cursor < max(_tlen_scrolled, 0):
+            self._promptline_scroll = at_char + _tlen
+            self.move_cursor(1, flush=False)
+            self.redraw_lastinp(0, force_redraw_prompt=True)
+        elif self.cursor > _tlen_scrolled + cols - 1:
+            self._promptline_scroll = max(0, at_char - cols + _tlen + 1)
+            self.move_cursor(cols, flush=False)
+            self.redraw_lastinp(0, force_redraw_prompt=True)
+        else:
+            # scrolling is not required in this case, thus redrawing
+            self.cursor = at_char
+            self.move_cursor(at_char - _tlen_scrolled + 1)
+
+    def redraw_lastinp(self, at: int, force_redraw_prompt=False):
+        """
+        Redisplay a user input at specified position on current cursor line.
+        If force_redraw_prompt is True, redraws the whole line entirely (including the prompt) regardless of scrolling state
+        """
+        # note: do not call move_cursor with redraw=True, this will cause an infinite recursion!
+        cols, lines = self.get_terminal_size()
+        if self._promptline_scroll or force_redraw_prompt:
+            at = 0
+            # move cursor at the beginning of the line
+            self.move_cursor(1, flush=False)
+            # clear the rest
+            self.stdout.write('\33[0J')
+            # reprint the prompt when possible
+            t_len = truelen(self.read_lastprompt)
+            visible_prompt_len = t_len - self._promptline_scroll
+            if visible_prompt_len > 0:
+                self.stdout.write('\r' + self.prompt_formats[0] + self.read_lastprompt[self._promptline_scroll:] + self.prompt_formats[1])
+            if self.echo:
+                # render part of user input and enable formats
+                _start = max(0, self._promptline_scroll - t_len)
+                _end = _start + cols - max(0, visible_prompt_len)
+                self.stdout.write(self.input_formats[0] + ''.join(self.read_lastinp[_start:_end]))
+                # restore cursor pos
+                self.move_cursor(visible_prompt_len + self.cursor + 1, flush=False)
+        elif self.echo:
+            # move cursor at redrawing part
+            t_len = truelen(self.read_lastprompt)
+            self.move_cursor(t_len + max(at, 1), flush=False)
+            # clear the rest
+            self.stdout.write('\33[0K')
+            # render part of user input and enable formats
+            self.stdout.write(self.input_formats[0] + ''.join(self.read_lastinp[max(at - 1, 0):cols - t_len]))
+            # restore cursor pos
+            self.move_cursor(truelen(self.read_lastprompt) + self.cursor + 1, flush=False)
         self.stdout.flush()
 
     async def prompt_line(self, prompt="> ", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
         """
-        Start reading a single-line user input with prompt from AsyncRawInput.stdin. Asynchronous version of input(prompt), handling the keystrokes.
+        Start reading a single-line user input with prompt from AsyncRawInput.stdin.
+        Asynchronous version of input(prompt), handling the keystrokes.
+        In addition to Python's input(prompt) function, the input is not wrapped
+        into the new line when overflowed, instead it hides the leftmost characters,
+        as well as handling the controlling terminal's resizing.
         To register a keystroke, use AsyncRawInput.add_keystroke(code, asyncfunction)
 
         Parameters
@@ -348,6 +432,7 @@ class AsyncRawInput():
             Dictionary of text formatting settings that are passed into format_term
             self.input_formats = format_term(**input_formats)
         """
+        self._promptline_scroll = 0
         try:
             _task = asyncio.current_task()
             if self._prompting_task is not None and not self._prompting_task.done() and self._prompting_task is not _task and self.is_reading:
@@ -362,7 +447,7 @@ class AsyncRawInput():
             self.prompt_formats = format_term(**prompt_formats)
             self.input_formats = format_term(**input_formats)
             if self.stdout.writable():
-                self.stdout.write(('\r%s' + self.read_lastprompt + '%s') % self.prompt_formats)
+                self.stdout.write('\r' + self.prompt_formats[0] + self.read_lastprompt + self.prompt_formats[1])
                 self.stdout.flush()
 
             read_clk = asyncio.Event()
@@ -386,7 +471,7 @@ class AsyncRawInput():
             self.echo = echo
             history_pos = 0
             history_incomplete = self.read_lastinp
-            # absolute cursor position is calculated using truelen(prompt) + self.cursor
+            # absolute cursor position is calculated using truelen(prompt) + self.cursor - self._promptline_scroll
             # dye the user input by the specified color
             self.stdout.write(self.input_formats[0])
             self.stdout.flush()
@@ -398,7 +483,10 @@ class AsyncRawInput():
                 read_clk.clear()
                 keystroke = ''.join(key)
                 if keystroke in self.keystrokes:
-                    await self.keystrokes[keystroke]()
+                    if asyncio.iscoroutinefunction(self.keystrokes[keystroke]):
+                        await self.keystrokes[keystroke]()
+                    else:
+                        self.keystrokes[keystroke]()
                     continue
                 if not keystroke.isprintable():
                     # one of the characters are not printable, which means that this is a keystroke
@@ -409,7 +497,12 @@ class AsyncRawInput():
                                 self.read_lastinp.pop(self.cursor - 1)
                                 self.cursor -= 1
                                 if echo:
-                                    self.redraw_lastinp(self.cursor)
+                                    if self._promptline_scroll > 0:
+                                        self._promptline_scroll -= 1
+                                        self.redraw_lastinp(self.cursor + 1, force_redraw_prompt=True)
+                                    else:
+                                        self.redraw_lastinp(self.cursor + 1)
+                            continue
                         elif ord(key[0]) == 3:
                             # Ctrl + C
                             if self.ctrl_c is None:
@@ -418,27 +511,36 @@ class AsyncRawInput():
                                 await self.ctrl_c()
                             else:
                                 self.ctrl_c()
+                            continue
                         elif ord(key[0]) == 13 or ord(key[0]) == 10:
                             # submit the input
                             break
                     elif ord(key[0]) == 27 and len(key) >= 3:
                         # probably arrow keys or other keystrokes
-                        if keystroke == '\33[D':
+                        if keystroke == '\33[3~':
+                            # delete (frontspace)
+                            if self.read_lastinp and self.cursor < len(self.read_lastinp):
+                                self.read_lastinp.pop(self.cursor)
+                                if echo:
+                                    self.redraw_lastinp(self.cursor + 1)
+                                self.move_input_cursor(self.cursor)
+                            continue
+                        elif keystroke == '\33[D':
                             # cursor left
                             if self.cursor > 0:
                                 self.cursor -= 1
                                 # self.stdout.write('\33[D')
                                 if self.echo:
-                                    self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
-                                    self.stdout.flush()
+                                    self.move_input_cursor(self.cursor)
+                            continue
                         elif keystroke == '\33[C':
                             # cursor right
                             if self.cursor < len(self.read_lastinp):
                                 self.cursor += 1
                                 # self.stdout.write('\33[C')
                                 if self.echo:
-                                    self.stdout.write('\33[%sG' % (truelen(self.read_lastprompt) + self.cursor + 1))
-                                    self.stdout.flush()
+                                    self.move_input_cursor(self.cursor)
+                            continue
                         elif keystroke == '\33[A':
                             # move older history (cursor up)
                             if self.history and not history_disabled:
@@ -447,8 +549,11 @@ class AsyncRawInput():
                                     # load previous command
                                     self.read_lastinp = list(self.history[-history_pos])
                                     self.cursor = len(self.read_lastinp)
+                                    cols, _ = self.get_terminal_size()
+                                    self._promptline_scroll = max(0, self.cursor - cols + truelen(self.read_lastprompt) + 1)
                                     if self.echo:
-                                        self.redraw_lastinp(1)
+                                        self.redraw_lastinp(0)
+                            continue
                         elif keystroke == '\33[B':
                             # move newer history (cursor)
                             if self.history and not history_disabled:
@@ -457,17 +562,22 @@ class AsyncRawInput():
                                     # load incomplete command
                                     self.read_lastinp = history_incomplete
                                     self.cursor = len(self.read_lastinp)
+                                    cols, _ = self.get_terminal_size()
+                                    self._promptline_scroll = max(0, self.cursor - cols + truelen(self.read_lastprompt) + 1)
                                     if self.echo:
-                                        self.redraw_lastinp(1)
+                                        self.redraw_lastinp(0)
                                 elif history_pos > 0:
                                     history_pos -= 1
                                     # load next command
                                     self.read_lastinp = list(self.history[-history_pos])
                                     self.cursor = len(self.read_lastinp)
-                                    self.redraw_lastinp(1)
+                                    cols, _ = self.get_terminal_size()
+                                    self._promptline_scroll = max(0, self.cursor - cols + truelen(self.read_lastprompt) + 1)
+                                    self.redraw_lastinp(0)
+                            continue
                         # else:
                         #     self.writeln('Unknown keystroke: %s' % ', '.join(repr(x) for x in key), fgcolor=colors.RED, bold=True)
-                    elif self.default_kshandler is not None:
+                    if self.default_kshandler is not None:
                         if asyncio.iscoroutinefunction(self.default_kshandler):
                             await self.default_kshandler(keystroke, key)
                         else:
@@ -482,9 +592,11 @@ class AsyncRawInput():
                     self.cursor += len(key)
                     if echo:
                         if self.cursor < len(self.read_lastinp):
-                            self.redraw_lastinp(self.cursor)
+                            # self.redraw_lastinp(self.cursor)
+                            self.redraw_lastinp(0)
                         else:
                             self.stdout.write(''.join(key))
+                        self.move_input_cursor(self.cursor)
                     self.stdout.flush()
             # remove input format
             result = ''.join(self.read_lastinp)
@@ -626,7 +738,36 @@ async def _process_inputs(amount: int):
     """
     rawprint('handling %s inputs' % amount)
     inp = AsyncRawInput(history=[])
+
+    def default_kshandler(keystroke: str, key: list):
+        inp.writeln("Unknown keystroke: %s" % key)
+
     inp.prepare()
+    inp.default_kshandler = default_kshandler
+
+    def print_cursor_pos():
+        inp.writeln("Cursor position: %s" % inp.cursor)
+
+    def print_termsize():
+        inp.writeln("Terminal size: %sx%s" % inp.get_terminal_size())
+
+    def print_scrolling():
+        inp.writeln("Scrolling: %s" % inp._promptline_scroll)
+
+    def scroll_left():
+        if inp._promptline_scroll > 0:
+            inp._promptline_scroll -= 1
+        inp.redraw_lastinp(0, True)
+
+    def scroll_right():
+        inp._promptline_scroll += 1
+        inp.redraw_lastinp(0, True)
+
+    inp.add_keystroke("\x10", print_cursor_pos)
+    inp.add_keystroke("\x0c", print_termsize)
+    inp.add_keystroke("\x13", print_scrolling)
+    inp.add_keystroke("\x01", scroll_left)
+    inp.add_keystroke("\x04", scroll_right)
     asyncio.create_task(_background_task(inp, 10))
     asyncio.create_task(_log_testing(inp, 6))
     # response = await inp.prompt_keystroke('Are you sure? y/n: ')
@@ -635,7 +776,7 @@ async def _process_inputs(amount: int):
     try:
         for i in range(amount):
             # rawprint('\r\33[0K' + ', '.join(str(x) for x in await inp.prompt_line()))
-            line = await inp.prompt_line()
+            line = await inp.prompt_line("Prompt> ")
             inp.writeln(repr(inp.history) + '\n\r\33[0K' + line, bold=True, fgcolor=colors.GREEN)
             # rawprint(await rinput())
     finally:
