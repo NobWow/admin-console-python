@@ -28,7 +28,6 @@ import datetime
 import logging
 import re
 import warnings
-import sys
 from enum import IntEnum, EnumMeta
 from math import ceil, prod
 from typing import Union, Sequence, MutableSequence, Tuple, Mapping, MutableMapping, Dict, List, Set, Optional, Type, Callable, Coroutine, Any
@@ -827,7 +826,7 @@ class AdminCommandExecutor():
     self.print = self.ainput.writeln
     self.logger = logger
     """
-    def __init__(self, stuff: Optional[Mapping] = None, use_config=True, logger: logging.Logger = None, extension_path='extensions/'):
+    def __init__(self, stuff: Optional[Mapping] = None, use_config=True, logger: logging.Logger = None, extension_path='extensions/', backend: Optional[AsyncRawInput] = None):
         """
         Parameters
         ----------
@@ -862,7 +861,10 @@ class AdminCommandExecutor():
         self.promptheader = 'nothing'
         self.promptarrow = '>'
         self.history: List[str] = []
-        self.ainput = AsyncRawInput(history=self.history)
+        if backend is None:
+            self.ainput = AsyncRawInput(history=self.history)
+        elif backend:
+            self.ainput = backend
         self.ainput.ctrl_c = self.full_cleanup
         self.prompt_format = {'bold': True, 'fgcolor': colors.GREEN}
         self.input_format = {'fgcolor': 10}
