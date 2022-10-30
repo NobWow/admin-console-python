@@ -23,7 +23,6 @@ from logging import Handler, NOTSET, LogRecord, Formatter, getLogger
 from logging import DEBUG, INFO, WARNING, ERROR, CRITICAL
 
 
-loop = asyncio.get_event_loop()
 # reset_format = '\x1b[00m'  # CSI and SGR 0
 do_backspace = '\10\33[0K'
 
@@ -45,6 +44,8 @@ def rawprint(*args, sep=' ', **kwargs):
 
 
 ansi_escape = re.compile(r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]')
+prev_word = re.compile("(\\w+) *$")
+next_word = re.compile("\\w+\\W+(\\w+)")
 
 
 def truelen(text: str) -> int:
@@ -188,7 +189,7 @@ class AsyncRawInput():
         stdout : io.TextIOWrapper = sys.stdout
             File-like object handling standard output.
         """
-        self.loop = loop if loop else asyncio.get_event_loop()
+        self.loop = loop if loop is not None else asyncio.get_event_loop()
         self.is_reading = False
         self.stdin = stdin
         self.stdout = stdout
@@ -575,6 +576,33 @@ class AsyncRawInput():
                                     self._promptline_scroll = max(0, self.cursor - cols + truelen(self.read_lastprompt) + 1)
                                     self.redraw_lastinp(0)
                             continue
+                        elif keystroke == '\33[H':
+                            # home key
+                            self.move_input_cursor(0)
+                            continue
+                        elif keystroke == '\33[F':
+                            # end key
+                            self.move_input_cursor(len(self.read_lastinp))
+                            continue
+                        # i am sorry for these workarounds... costs some CPU time
+                        elif keystroke == '\33[1;5D':
+                            # previous word
+                            if self.cursor > 0 and self.read_lastinp:
+                                _prevword_match = prev_word.search(''.join(self.read_lastinp), 0, self.cursor)
+                                if _prevword_match is not None:
+                                    self.move_input_cursor(_prevword_match.start(1))
+                                else:
+                                    self.move_input_cursor(0)
+                            continue
+                        elif keystroke == '\33[1;5C':
+                            # next word
+                            if self.cursor < len(self.read_lastinp) and self.read_lastinp:
+                                _nextword_match = next_word.search(''.join(self.read_lastinp), self.cursor)
+                                if _nextword_match is not None:
+                                    self.move_input_cursor(_nextword_match.start(1))
+                                else:
+                                    self.move_input_cursor(len(self.read_lastinp))
+                            continue
                         # else:
                         #     self.writeln('Unknown keystroke: %s' % ', '.join(repr(x) for x in key), fgcolor=colors.RED, bold=True)
                     if self.default_kshandler is not None:
@@ -800,4 +828,5 @@ async def _main():
 
 
 if __name__ == '__main__':
+    loop = asyncio.new_event_loop()
     loop.run_until_complete(_main())
