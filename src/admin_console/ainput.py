@@ -826,7 +826,6 @@ class AsyncRawInput(AbstractARI):
             if self._prompting_task is not None and not self._prompting_task.done() and self._prompting_task is not _task and self.is_reading:
                 self._prompting_task.cancel()
             self._prompting_task = _task
-            event = asyncio.Event()
             self.read_lastprompt = prompt
             if self.stdout.writable():
                 self.stdout.write(('\r' + self.read_lastprompt))
@@ -835,7 +834,7 @@ class AsyncRawInput(AbstractARI):
             self.echo = echo
             self.is_reading = True
             self.loop.add_reader(self.stdin.fileno(), self._stdin_handler)
-            await event.wait()
+            await self.read_clk.wait()
             result = ''.join(self.current_input_buffer)
             if echo:
                 self.stdout.write(''.join(result))
