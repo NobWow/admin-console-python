@@ -835,6 +835,7 @@ class AsyncRawInput(AbstractARI):
             self.is_reading = True
             self.loop.add_reader(self.stdin.fileno(), self._stdin_handler)
             await self.read_clk.wait()
+            self.read_clk.clear()
             result = ''.join(self.current_input_buffer)
             if echo:
                 self.stdout.write(''.join(result))
