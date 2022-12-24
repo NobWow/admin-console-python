@@ -7,12 +7,15 @@ Doesn't support Windows or any non-POSIX terminals
 import asyncio
 import os
 import sys
+from bisect import bisect_left
+from operator import itemgetter
 from enum import Enum
 from typing import Union, Sequence, Tuple, MutableSequence, Optional, Callable, Coroutine, Any
 import traceback
 
 # raw mode features
 from signal import SIGWINCH
+from abc import ABC
 import tty
 import termios
 import io
@@ -135,9 +138,201 @@ def format_term(*, bold=False, italic=False, underline=False, blink=False, fgcol
            '\33[%sm' % ';'.join(str(x) for x in end)
 
 
-class AsyncRawInput():
+class AbstractARI(ABC):
     """
-    Main class for asynchronous input and proper output handling
+    An abstract class for asynchronous CLI-interaction with user.
+    Calls end() when destructed.
+    """
+    def __init__(self, history: list = None, history_limit: int = 30, *args, loop=None):
+        """
+        Parameters
+        ----------
+        history : list
+            List of str containing previous user input
+        history_limit : int = 30
+            Max amount of elements in history list, when exceeded the old values gets deleted.
+        """
+        pass
+
+    def __del__(self):
+        self.end()
+
+    def prepare(self):
+        """
+        Does whatever to initialize the terminal interaction.
+        """
+        pass
+
+    def on_terminal_resize(self, *args, **kw):
+        """
+        Called when a terminal is resized. Implementation-specific.
+        """
+        pass
+
+    def end(self):
+        """
+        Does whatever to finalize the terminal interaction.
+        """
+        pass
+
+    def get_interrupt_handler(self) -> Callable[[Any], Coroutine[Any, Any, Any]]:
+        """
+        When Ctrl + C is pressed, the returned async function is called.
+        """
+        pass
+
+    def set_interrupt_handler(self, callback):
+        """
+        Sets the callback for Ctrl + C keystroke
+
+        Parameters
+        ----------
+        callback : coroutine or regular function
+            (async) callback, called without arguments
+        """
+        pass
+
+    def add_keystroke(self, keystroke: str, asyncfunction):
+        """
+        Add a new keystroke to the terminal
+
+        Parameters
+        ----------
+        keystroke : str
+            Raw keystroke code. For example, tab keystroke will be: "\\t", Ctrl + F will be "\\x06"
+        asyncfunction : async function
+            Async callback called without arguments
+        """
+        # self.keystrokes[keystroke] = asyncfunction
+        pass
+
+    def remove_keystroke(self, keystroke: str):
+        """
+        Remove a keystroke from the terminal
+
+        Parameters : str
+            Raw keystroke code.
+        """
+        # del self.keystrokes[keystroke]
+        pass
+
+    async def awrite(self, msg: str, **formats):
+        """
+        Write a formatted text to a terminal without CRLF.
+        Don't use it when a user input is prompted
+
+        Parameters
+        ----------
+        msg : str
+            The text without CRLF.
+        **formats : keyword arguments
+            Formatting arguments passed as format_term(**formats)
+        """
+        pass
+
+    async def awriteln(self, msg: str, *, error=False, **formats):
+        """
+        Show a message on the terminal, preserving a user prompt if any.
+
+        Parameters
+        ----------
+        msg : str
+            The message text.
+        error : bool
+            If True, message will be written to the error stream instead. Default is False.
+        **formats : keyword arguments
+            Formatting arguments passed as format_term(**formats)
+        """
+        pass
+
+    def write(self, msg: str, *, error=False, **formats):
+        """
+        Same as awrite, but does it synchronously or applies the data into the queue
+        """
+        pass
+
+    def writeln(self, msg: str, *, error=False, **formats):
+        """
+        Same as awriteln, but does it synchronously or applies the data into the queue
+        """
+        pass
+
+    def get_terminal_size(self) -> Union[os.terminal_size, Tuple[int, int]]:
+        """
+        Obtain current resolution of the terminal. Returns tuple-like object: rows, lines
+        """
+        pass
+
+    def move_cursor(self, at: int, *, flush=True, redraw=False):
+        """
+        Moves the cursor across the current line.
+        Parameter at starts from 1, which means that at=1 is the first character of the terminal line
+        """
+        pass
+
+    def move_input_cursor(self, at_char: int):
+        """
+        Sets the cursor's input position at specified character. Scrolls the input horizontally when necessary.
+        """
+        pass
+
+    def redraw_lastinp(self, at: int, force_redraw_prompt=False):
+        pass
+
+    async def get_key(self):
+        """
+        Asynchronously obtain a single character or keystroke from
+        """
+        raise NotImplementedError
+
+    async def prompt_line(self, prompt="> ", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
+        """
+        Start reading a single-line user input with prompt.
+        Asynchronous version of input(prompt), handling the keystrokes.
+        In addition to Python's input(prompt) function, the input is not wrapped
+        into the new line when overflowed, instead it hides the leftmost characters,
+        as well as handling the controlling terminal's resizing.
+        To register a keystroke, use AsyncRawInput.add_keystroke(code, asyncfunction)
+
+        Parameters
+        ----------
+        prompt : str
+            The text that is displayed before user input
+        echo : bool
+            Whether or not a user input will be displayed. Set to False when prompting a password
+        history_disabled : bool
+            Whether or not a new entry should not be added on successful user input. Set to True when prompting a password
+        prompt_formats : dict
+            Dictionary of text formatting settings that are passed into format_term
+            self.prompt_formats = format_term(**prompt_formats)
+        input_formats : dict
+            Dictionary of text formatting settings that are passed into format_term
+            self.input_formats = format_term(**input_formats)
+        """
+        pass
+
+    async def prompt_keystroke(self, prompt=': ', echo=True) -> str:
+        """
+        Start reading a single character from a terminal. Not handling the keystrokes.
+
+        Parameters
+        ----------
+        prompt : str
+            The text that is displayed before user input
+        echo : bool
+            Whether or not a user input will be displayed.
+
+        Returns
+        -------
+        str
+            Resulting pressed keystroke
+        """
+        pass
+
+
+class AsyncRawInput(AbstractARI):
+    """
+    Unix implementation for asynchronous input and proper output handling
 
     Before using its features, self.prepare() should be called
     self.end() is called on object destruction handler
@@ -150,6 +345,8 @@ class AsyncRawInput():
         File-like object handling the terminal input
     self.stdout : io.TextIOWrapper
         File-like object handling the terminal output
+    self.stderr : io.TextIOWrapper
+        File-like object handling the error output
     self.read_lastinp : list
         List of str, containing each character for a mutable Unicode string
         Represents an unentered user input displaying on the terminal
@@ -168,15 +365,15 @@ class AsyncRawInput():
         Whether or not the user input is shown on the terminal. Don't modify it manually
     self.ctrl_c : (async) function
         Async callback that is called when Ctrl + C is pressed in the terminal
-    self.keystrokes : dict
-        Mapping of keystroke handlers.
-        { "raw keystroke code": async callable }
+    self.keystrokes : list
+        Sorted list of keystroke handlers (tuple).
+        ( "raw keystroke code", async callable )
     self.prompt_formats : tuple(str, str)
         Formatting header, footer pair for displaying a prompt.
     self.input_formats : tuple(str, str)
         Formatting header, footer pair for displaying a user input
     """
-    def __init__(self, history: list = None, history_limit: int = 30, stdin: io.TextIOWrapper = sys.stdin, stdout: io.TextIOWrapper = sys.stdout, *, loop=None):
+    def __init__(self, history: list = None, history_limit: int = 30, stdin: io.TextIOWrapper = sys.stdin, stdout: io.TextIOWrapper = sys.stdout, stderr: io.TextIOWrapper = sys.stderr, *, loop=None):
         """
         Parameters
         ----------
@@ -193,16 +390,23 @@ class AsyncRawInput():
         self.is_reading = False
         self.stdin = stdin
         self.stdout = stdout
+        self.stderr = stderr
+        # Triggered every time a stream is available to be IO'ed.
+        self.read_clk = asyncio.Event()
+        self.write_clk = asyncio.Event()
+        self.error_clk = asyncio.Event()
+        self.read_lastkey: Optional[str] = None
         self.read_lastinp: MutableSequence[str] = []  # can only contain printable strings,
         # ...mutability but extra memory consumption
         self.read_lastprompt = ''
         self.old_tcattrs: MutableSequence[int] = None
-        self.was_blocking: Optional[bool] = None
+        self.was_blocking: Optional[Tuple[bool, bool, bool]] = None
         self.prepared = False
         self.history = history
         self.history_limit = history_limit
         self.cursor = 0
         self._promptline_scroll = 0  # when terminal column-size exceeded, indicates the horizontal scroll
+        self.current_input_buffer = []
         # horizontal scrolling behavior:
         # - draw only single line of input
         # - when at least 1 character of prompt can be shown, always format it, don't skip formatting
@@ -212,25 +416,44 @@ class AsyncRawInput():
         # - when scroll > 0, always redraw the prompt
         self.echo = True
         self.ctrl_c = None
-        self.keystrokes = {}
+        self.keystrokes: MutableSequence[Tuple[str, Callable[Any, Coroutine[Any, Any, Any]]]] = []
         self.default_kshandler: Optional[Callable[[str, list], Coroutine[Any, Any, Any]]] = None
         self.prompt_formats: Sequence[Tuple[str, str]] = ('', '')
         self.input_formats: Sequence[Tuple[str, str]] = ('', '')
         self._prompting_task: Optional[asyncio.Task] = None
 
-    def __del__(self):
-        self.end()
+    # Keystrokes that are handled in prompt_line
+    def _enter_ks(self):
+        pass
+
+    def _backspace_ks(self):
+        if self.read_lastinp and self.cursor != 0:
+            self.read_lastinp.pop(self.cursor - 1)
+            self.cursor -= 1
+            if self.echo:
+                if self._promptline_scroll > 0:
+                    self._promptline_scroll -= 1
+                    self.redraw_lastinp(self.cursor + 1, force_redraw_prompt=True)
+                else:
+                    self.redraw_lastinp(self.cursor + 1)
 
     def prepare(self):
         """
-        Enables raw mode, saving the old TTY settings. Disables blocking mode for standard input
+        Enables raw mode, saving the old TTY settings.
+        Disables blocking mode for standard input, output and error output.
         Hooks up the SIGWINCH signal handler, which will redraw the prompt line if any.
         """
         if not self.prepared:
             self.old_tcattrs = termios.tcgetattr(self.stdin.fileno())
         self.prepared = True
-        self.was_blocking = os.get_blocking(self.stdin.fileno())
+        self.was_blocking = (
+            os.get_blocking(self.stdin.fileno()),
+            os.get_blocking(self.stdout.fileno()),
+            os.get_blocking(self.stderr.fileno()),
+        )
         os.set_blocking(self.stdin.fileno(), False)
+        os.set_blocking(self.stdout.fileno(), False)
+        os.set_blocking(self.stderr.fileno(), False)
         self.loop.add_signal_handler(SIGWINCH, self.on_terminal_resize)
         tty.setraw(self.stdin.fileno())
 
@@ -250,71 +473,53 @@ class AsyncRawInput():
         self.loop.remove_signal_handler(SIGWINCH)
         self.is_reading = False
         self.prepared = False
-        os.set_blocking(self.stdin.fileno(), self.was_blocking)
+        os.set_blocking(self.stdin.fileno(), self.was_blocking[0])
+        os.set_blocking(self.stdout.fileno(), self.was_blocking[1])
+        os.set_blocking(self.stderr.fileno(), self.was_blocking[2])
 
     def get_interrupt_handler(self) -> Callable[[Any], Coroutine[Any, Any, Any]]:
         return self.ctrl_c
 
     def set_interrupt_handler(self, callback):
-        """
-        Sets the callback for Ctrl + C keystroke
-
-        Parameters
-        ----------
-        callback : coroutine or regular function
-            (async) callback, called without arguments
-        """
         self.ctrl_c = callback
 
     def add_keystroke(self, keystroke: str, asyncfunction):
-        """
-        Add a new keystroke to the terminal
-
-        Parameters
-        ----------
-        keystroke : str
-            Raw keystroke code. For example, tab keystroke will be: "\\t", Ctrl + F will be "\\x06"
-        asyncfunction : async function
-            Async callback called without arguments
-        """
-        self.keystrokes[keystroke] = asyncfunction
+        index = bisect_left(self.keystrokes, keystroke, key=itemgetter(0))
+        try:
+            if self.keystrokes[index] == keystroke:
+                raise ValueError(f'keystroke {repr(keystroke)} already exists')
+        except IndexError:
+            pass
+        self.keystrokes.insert(index, (keystroke, asyncfunction))
 
     def remove_keystroke(self, keystroke: str):
-        """
-        Remove a keystroke from the terminal
+        index = bisect_left(self.keystrokes, keystroke, key=itemgetter(0))
+        if self.keystrokes[index][0] == keystroke:
+            del self.keystrokes[index]
+        else:
+            raise ValueError(f'keystroke {repr(keystroke)} not found')
 
-        Parameters : str
-            Raw keystroke code.
+    async def awrite(self, msg: str, *, error=False, **formats):
         """
-        del self.keystrokes[keystroke]
+        Mapped to write(), the asynchronous write will be implemented later.
+        """
+        self.write(msg, **formats)
 
-    def write(self, msg: str, **formats):
+    async def awriteln(self, msg: str, *, error=False, **formats):
         """
-        Write a formatted text to a terminal without CRLF.
-        Don't use it when a user input is prompted
+        Mapped to writeln(), the asynchronous writeln will be implemented later.
+        """
+        self.writeln(msg, **formats)
 
-        Parameters
-        ----------
-        msg : str
-            The text without CRLF.
-        **formats : keyword arguments
-            Formatting arguments passed as format_term(**formats)
-        """
+    def write(self, msg: str, *, error=False, **formats):
+        stream = self.stderr if error else self.stdout
         _formats = format_term(**formats)
-        self.stdout.write('\r' + _formats[0] + carriage_return(msg) + _formats[1])
+        stream.write(_formats[0] + carriage_return(msg) + _formats[1])
+        stream.flush()
 
-    def writeln(self, msg: str, **formats):
-        """
-        Show a message on the terminal, preserving a user prompt if any.
-
-        Parameters
-        ----------
-        msg : str
-            The message text.
-        **formats : keyword arguments
-            Formatting arguments passed as format_term(**formats)
-        """
+    def writeln(self, msg: str, *, error=False, **formats):
         formats_tuple = format_term(**formats)
+        stream = self.stderr if error else self.stdout
         if len(formats_tuple) != 2:
             formats_tuple = ('', '')
         if self.is_reading:
@@ -323,11 +528,12 @@ class AsyncRawInput():
             # clear the current line over the cursor
             self.stdout.write('\r\33[2K')
             # write the message
-            self.stdout.write('\r' + formats_tuple[0] + carriage_return(msg) + formats_tuple[1] + '\n')
+            stream.write('\r' + formats_tuple[0] + carriage_return(msg) + formats_tuple[1] + '\n')
+            stream.flush()
             self.redraw_lastinp(0, force_redraw_prompt=True)
         else:
-            self.stdout.write('\r\33[0K' + formats_tuple[0] + carriage_return(msg) + formats_tuple[1] + '\n\r')
-            self.stdout.flush()
+            stream.write('\r\33[0K' + formats_tuple[0] + carriage_return(msg) + formats_tuple[1] + '\n\r')
+            stream.flush()
 
     def get_terminal_size(self) -> Union[os.terminal_size, Tuple[int, int]]:
         return os.get_terminal_size(self.stdout.fileno())
@@ -409,30 +615,21 @@ class AsyncRawInput():
             self.move_cursor(truelen(self.read_lastprompt) + self.cursor + 1, flush=False)
         self.stdout.flush()
 
-    async def prompt_line(self, prompt="> ", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
-        """
-        Start reading a single-line user input with prompt from AsyncRawInput.stdin.
-        Asynchronous version of input(prompt), handling the keystrokes.
-        In addition to Python's input(prompt) function, the input is not wrapped
-        into the new line when overflowed, instead it hides the leftmost characters,
-        as well as handling the controlling terminal's resizing.
-        To register a keystroke, use AsyncRawInput.add_keystroke(code, asyncfunction)
+    def _stdin_handler(self):
+        try:
+            self.current_input_buffer.clear()
+            while True:
+                symbol = self.stdin.read(1)
+                if not symbol:
+                    self.read_clk.set()
+                    break
+                self.current_input_buffer.append(symbol)
+        except TypeError:
+            self.read_clk.set()
+        except BlockingIOError:
+            self.read_clk.set()
 
-        Parameters
-        ----------
-        prompt : str
-            The text that is displayed before user input
-        echo : bool
-            Whether or not a user input will be displayed. Set to False when prompting a password
-        history_disabled : bool
-            Whether or not a new entry should not be added on successful user input. Set to True when prompting a password
-        prompt_formats : dict
-            Dictionary of text formatting settings that are passed into format_term
-            self.prompt_formats = format_term(**prompt_formats)
-        input_formats : dict
-            Dictionary of text formatting settings that are passed into format_term
-            self.input_formats = format_term(**input_formats)
-        """
+    async def prompt_line(self, prompt="> ", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
         self._promptline_scroll = 0
         try:
             _task = asyncio.current_task()
@@ -450,24 +647,6 @@ class AsyncRawInput():
             if self.stdout.writable():
                 self.stdout.write('\r' + self.prompt_formats[0] + self.read_lastprompt + self.prompt_formats[1])
                 self.stdout.flush()
-
-            read_clk = asyncio.Event()
-            key = []
-
-            def stdin_reader():
-                try:
-                    key.clear()
-                    while True:
-                        symbol = self.stdin.read(1)
-                        if not symbol:
-                            read_clk.set()
-                            break
-                        key.append(symbol)
-                except TypeError:
-                    read_clk.set()
-                except BlockingIOError:
-                    read_clk.set()
-
             self.cursor = 0
             self.echo = echo
             history_pos = 0
@@ -477,34 +656,28 @@ class AsyncRawInput():
             self.stdout.write(self.input_formats[0])
             self.stdout.flush()
             while self.is_reading:
-                self.loop.add_reader(self.stdin.fileno(), stdin_reader)
+                self.loop.add_reader(self.stdin.fileno(), self._stdin_handler)
                 # suspend until a key is pressed
-                await read_clk.wait()
+                await self.read_clk.wait()
                 self.loop.remove_reader(self.stdin.fileno())
-                read_clk.clear()
-                keystroke = ''.join(key)
-                if keystroke in self.keystrokes:
-                    if asyncio.iscoroutinefunction(self.keystrokes[keystroke]):
-                        await self.keystrokes[keystroke]()
+                self.read_clk.clear()
+                keystroke = ''.join(self.current_input_buffer)
+                index = max(0, min(len(self.keystrokes) - 1, bisect_left(self.keystrokes, keystroke, key=itemgetter(0))))
+                # self.writeln(f'Keystroke: {index}, keystrokes: {repr(self.keystrokes)}')
+                if self.keystrokes[index][0] == keystroke:
+                    if asyncio.iscoroutinefunction(self.keystrokes[index][1]):
+                        await self.keystrokes[index][1]()
                     else:
-                        self.keystrokes[keystroke]()
+                        self.keystrokes[index][1]()
                     continue
                 if not keystroke.isprintable():
                     # one of the characters are not printable, which means that this is a keystroke
-                    if len(key) == 1:
-                        if ord(key[0]) == 127 or ord(key[0]) == 8:
+                    if len(self.current_input_buffer) == 1:
+                        if ord(self.current_input_buffer[0]) == 127 or ord(self.current_input_buffer[0]) == 8:
                             # do backspace
-                            if self.read_lastinp and self.cursor != 0:
-                                self.read_lastinp.pop(self.cursor - 1)
-                                self.cursor -= 1
-                                if echo:
-                                    if self._promptline_scroll > 0:
-                                        self._promptline_scroll -= 1
-                                        self.redraw_lastinp(self.cursor + 1, force_redraw_prompt=True)
-                                    else:
-                                        self.redraw_lastinp(self.cursor + 1)
+                            self._backspace_ks()
                             continue
-                        elif ord(key[0]) == 3:
+                        elif ord(self.current_input_buffer[0]) == 3:
                             # Ctrl + C
                             if self.ctrl_c is None:
                                 raise RuntimeError('Ctrl + C is not handled')
@@ -513,10 +686,10 @@ class AsyncRawInput():
                             else:
                                 self.ctrl_c()
                             continue
-                        elif ord(key[0]) == 13 or ord(key[0]) == 10:
+                        elif ord(self.current_input_buffer[0]) == 13 or ord(self.current_input_buffer[0]) == 10:
                             # submit the input
                             break
-                    elif ord(key[0]) == 27 and len(key) >= 3:
+                    elif ord(self.current_input_buffer[0]) == 27 and len(self.current_input_buffer) >= 3:
                         # probably arrow keys or other keystrokes
                         if keystroke == '\33[3~':
                             # delete (frontspace)
@@ -607,9 +780,9 @@ class AsyncRawInput():
                         #     self.writeln('Unknown keystroke: %s' % ', '.join(repr(x) for x in key), fgcolor=colors.RED, bold=True)
                     if self.default_kshandler is not None:
                         if asyncio.iscoroutinefunction(self.default_kshandler):
-                            await self.default_kshandler(keystroke, key)
+                            await self.default_kshandler(keystroke, self.current_input_buffer)
                         else:
-                            self.default_kshandler(keystroke, key)
+                            self.default_kshandler(keystroke, self.current_input_buffer)
                     # always reread after a keystroke dispatched
                     continue
                 else:
@@ -617,13 +790,13 @@ class AsyncRawInput():
                     # for i in range(len(key)):
                     #    self.read_lastinp.insert(self.cursor + i, key[i])
                     self.read_lastinp[self.cursor:self.cursor] = keystroke
-                    self.cursor += len(key)
+                    self.cursor += len(self.current_input_buffer)
                     if echo:
                         if self.cursor < len(self.read_lastinp):
                             # self.redraw_lastinp(self.cursor)
                             self.redraw_lastinp(0)
                         else:
-                            self.stdout.write(''.join(key))
+                            self.stdout.write(''.join(self.current_input_buffer))
                         self.move_input_cursor(self.cursor)
                     self.stdout.flush()
             # remove input format
@@ -644,21 +817,6 @@ class AsyncRawInput():
             self.is_reading = False
 
     async def prompt_keystroke(self, prompt=': ', echo=True) -> str:
-        """
-        Start reading a single character from a terminal. Not handling the keystrokes.
-
-        Parameters
-        ----------
-        prompt : str
-            The text that is displayed before user input
-        echo : bool
-            Whether or not a user input will be displayed.
-
-        Returns
-        -------
-        str
-            Resulting pressed keystroke
-        """
         backup_inputformats = self.input_formats
         backup_promptformats = self.prompt_formats
         self.input_formats = ('', '')
@@ -668,7 +826,6 @@ class AsyncRawInput():
             if self._prompting_task is not None and not self._prompting_task.done() and self._prompting_task is not _task and self.is_reading:
                 self._prompting_task.cancel()
             self._prompting_task = _task
-            char = []
             event = asyncio.Event()
             self.read_lastprompt = prompt
             if self.stdout.writable():
@@ -676,31 +833,19 @@ class AsyncRawInput():
                 self.stdout.flush()
             self.cursor = 0
             self.echo = echo
-
-            def char_reader():
-                try:
-                    while True:
-                        symbol = self.stdin.read(1)
-                        if not symbol:
-                            event.set()
-                            break
-                        char.append(symbol)
-                except TypeError:
-                    event.set()
-                except BlockingIOError:
-                    event.set()
-
             self.is_reading = True
-            self.loop.add_reader(self.stdin.fileno(), char_reader)
+            self.loop.add_reader(self.stdin.fileno(), self._stdin_handler)
             await event.wait()
-            result = ''.join(char)
-            self.stdout.write(''.join(result))
+            result = ''.join(self.current_input_buffer)
+            if echo:
+                self.stdout.write(''.join(result))
             return result
         finally:
             self.is_reading = False
             self.loop.remove_reader(self.stdin.fileno())
-            self.stdout.write('\r\n')
-            self.stdout.flush()
+            if echo:
+                self.stdout.write('\r\n')
+                self.stdout.flush()
         self.input_formats = backup_inputformats
         self.prompt_formats = backup_promptformats
 
@@ -796,6 +941,7 @@ async def _process_inputs(amount: int):
     inp.add_keystroke("\x13", print_scrolling)
     inp.add_keystroke("\x01", scroll_left)
     inp.add_keystroke("\x04", scroll_right)
+    inp.remove_keystroke("\x04")
     asyncio.create_task(_background_task(inp, 10))
     asyncio.create_task(_log_testing(inp, 6))
     # response = await inp.prompt_keystroke('Are you sure? y/n: ')

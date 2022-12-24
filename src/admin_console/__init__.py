@@ -39,6 +39,9 @@ from itertools import chain, repeat, dropwhile, islice
 from functools import partial
 
 
+__version__ = "1.4.2"
+
+
 class CustomType:
     """Base class inherited by all custom types for commands. Has only one predefined method that all derivative types must have: getValue()"""
     _typename = 'custom'
