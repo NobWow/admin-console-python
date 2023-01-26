@@ -46,6 +46,13 @@ class CustomType:
     """Base class inherited by all custom types for commands. Has only one predefined method that all derivative types must have: getValue()"""
     _typename = 'custom'
 
+    def __init__(self, value: str):
+        """
+        Validate the value and initialize.
+        Raises ValueError if the value provided is invalid
+        """
+        self._rawvalue = value
+
     def __str__(self):
         return self.getRawValue()
 
@@ -100,7 +107,6 @@ allescapesplitter = re.compile(r'(\\\\|\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|\\[0-
 octal = re.compile(r'\\[0-7]{1,3}')
 quoted = re.compile(r'(?P<quote>["\']).*?(?P=quote)')
 hexescapefinder = re.compile('(?<!\\\\)\\\\x[0-9a-fA-F]{2}')
-zerostr = '0'
 single_char_escaper = {
     "a": "\a",
     "b": "\b",
@@ -151,7 +157,7 @@ class NotEnoughArguments(Exception):
 
 
 # Additional derivative types for commands
-class BaseDiscreteScale(int, CustomType):
+class BaseDiscreteScale(CustomType):
     """Base class for defining discrete scale types. An inheritor must either implement getMin, getMax, getStep methods or
     set self._min, self._max and self._step variables accordingly.
     Default value for _step is 1"""
@@ -159,21 +165,21 @@ class BaseDiscreteScale(int, CustomType):
     _step = 1
 
     def __init__(self, value, /, *args, **kwargs):
-        self._rawvalue = value
+        super().__init__(value)
+        value = int(value)
         if self._step == 0:
             raise ValueError("_step must not be zero")
-        num = super(int).__init__(value, *args, **kwargs)
         _start, _end, _step = self.getMin(), self.getMax(), self.getStep()
-        if num not in range(_start, _end, _step):
-            raise InvalidArgument(f"an integer must be in range between {_start} and {_end} by +{_step} each")
-        self._value = num
+        if value not in range(_start, _end + _step, _step):
+            raise InvalidArgument(f"an integer must be in range between {_start} and {_end} inclusively by +{_step} each")
+        self._value = value
 
     def getValue(self) -> int:
         return self._value
 
     @classmethod
-    def getTypeName(self, cmd) -> str:
-        return super(CustomType).getTypeName(cmd).format(self.getMin(), self.getMax())
+    def getTypeName(cls, ace) -> str:
+        return cls._typename.format(cls.getMin(), cls.getMax())
 
     @classmethod
     def getMin(cls) -> int:
@@ -192,30 +198,35 @@ class BaseDiscreteScale(int, CustomType):
 
     @classmethod
     def tabComplete(cls, value: Optional[str] = None):
-        return list(range(cls.getMin(), cls.getMax() + 1, cls.getStep()))
+        return list(str(element) for element in range(cls.getMin(), cls.getMax() + 1, cls.getStep()))
 
 
 class FixedEnumType(BaseDiscreteScale):
     """
     Base class for defining a discrete scale of constant certain objects (e.g. words, literal phrases)
     This class must be subclassed with cls._enum of type IntEnum, An enum must be ordered and start from 0.
-    If an enum starts from a number other than 0, specify keyword start_at with
-    super().__init__(self, value: str, *args, start_at=N)
     """
     _typename = 'literal'
+    _min = 0
 
     def __init__(self, value: Optional[str] = None, *args, from_instance: Optional[IntEnum] = None, start_at: int = 0, **kwargs):
+        super().__init__(value)
         self._enum: EnumMeta
-        self._enuminstance: IntEnum = getattr(self._enum, value) if from_instance is not None else from_instance
+        try:
+            self._enuminstance: IntEnum = getattr(self._enum, value) if from_instance is None else from_instance
+        except AttributeError:
+            raise ValueError(f'"{value}" is not valid member of {self._enum}')
         self._value = self._enuminstance.value
-        self._min = start_at
-        self._max = max(len(self._enum) - 1 + start_at, self._value)
 
     def getEnum(self):
         """
         Returns an underlying Enum instance
         """
         return self._enuminstance
+
+    @classmethod
+    def getMax(cls):
+        return cls.getMin() + len(cls._enum) - 1
 
     def getRawValue(self):
         return self._enuminstance.name
@@ -226,33 +237,31 @@ class FixedEnumType(BaseDiscreteScale):
 
     @classmethod
     def tabComplete(cls, value: str):
-        return list(filter(partial(cls._startswith_predicate, value), iter(cls._enum)))
+        return list(element.name for element in filter(partial(cls._startswith_predicate, value), iter(cls._enum)))
 
 
-class BaseContinuousScale(float, CustomType):
+class BaseContinuousScale(CustomType):
     """
     Base class for defining types that are based on float, but has boundaries
     Unlike BaseDiscreteScale, this type doesn't have _step attribute as it is continuous.
     """
     _typename = '{0: .2f}<=n.n<={1: .2f}'
-    _step = 1
 
     def __init__(self, value, /, *args, **kwargs):
-        if self._step == 0:
-            raise ValueError("_step must not be zero")
-        num = super(float).__init__(value, *args, **kwargs)
-        _start, _end, _step = self.getMin(), self.getMax(), self.getStep()
-        if num not in range(_start, _end, _step):
-            raise InvalidArgument("an integer must be in range between {0} and {1} by +{2} each".format(
-                                  _start, _end, _step))
-        self._value = num
+        super().__init__(value)
+        value = float(value)
+        _start, _end = self.getMin(), self.getMax()
+        if value < _start or value > _end:
+            raise InvalidArgument("a float value must be in range between {0} and {1} inclusively".format(
+                                  _start, _end))
+        self._value = value
 
     def getValue(self) -> float:
         return self._value
 
     @classmethod
     def getTypeName(cls, ace) -> str:
-        return cls.getTypeName(ace).format(cls.getMin(), cls.getMax())
+        return cls._typename.format(cls.getMin(), cls.getMax())
 
     @classmethod
     def getMin(cls) -> float:
@@ -273,6 +282,7 @@ class DateType(CustomType):
     date_reverse_expr = "%Y/%m/%d"
 
     def __init__(self, value: Optional[str] = None, *, raise_exc=True, from_date: Optional[datetime.date] = None):
+        super().__init__(value)
         if from_date is not None:
             self._value = from_date
         else:
@@ -300,6 +310,7 @@ class TimeType(CustomType):
     time_reverse_expr = "%H:%M:%S"
 
     def __init__(self, value: Optional[str] = None, *, raise_exc=True, from_time: Optional[datetime.time] = None):
+        super().__init__(value)
         if from_time is not None:
             self._value = from_time
         else:
@@ -326,6 +337,7 @@ class TimeType(CustomType):
         _r %= 60
         return cls(from_time=datetime.time(_hour, _minute, _r))
 
+    @classmethod
     def tabComplete(cls, value: str):
         return [value + datetime.datetime.utcnow().strftime(cls.time_reverse_expr)]
 
@@ -339,6 +351,7 @@ class DateTimeType(CustomType):
     datetime_reverse_expr = f"{DateType.date_reverse_expr}_{TimeType.time_reverse_expr}"
 
     def __init__(self, value: Optional[str] = None, *, raise_exc=True, from_datetime: Optional[datetime.datetime] = None):
+        super().__init__(value)
         if from_datetime is not None:
             self._value = from_datetime
         else:
@@ -393,6 +406,7 @@ class DurationType(CustomType):
     _typename = 'duration Ns,Nm,Nh...'
 
     def __init__(self, value: Optional[str] = None, *, raise_exc=True, from_timedelta: datetime.timedelta = None):
+        super().__init__(value)
         if from_timedelta is not None:
             self._value = from_timedelta
         else:
@@ -569,7 +583,7 @@ class AdminCommand():
                 elif _res:
                     _len = len(args)
                     if argl or not _len:
-                        # its when next command is tabcompleted
+                        # it's when next arg is tabcompleted
                         _len += 1
                         _last_type = self.argchain[_len - 1][0]
                         if _last_type in (None, str):
@@ -1221,7 +1235,7 @@ class AdminCommandExecutor():
         remnant = argl
         arg_iterator = chain(argsplitter.finditer(argl), repeat(None))
         if argtypes:
-            for argdata, argmatch in zip(argtypes, arg_iterator):
+            for argid, (argdata, argmatch) in enumerate(zip(argtypes, arg_iterator)):
                 argtype, argname = argdata
                 if argtype is None:
                     args.append(parse_escapes(remnant.lstrip()))
@@ -1326,7 +1340,7 @@ class AdminCommandExecutor():
                 self.print(self.usage(cmdname))
             await cmd.execute(self, args)
         except NotEnoughArguments as exc:
-            self.print(self.lang['notenoughargs'].format(len(cmd.args), exc.args[0]))
+            self.print(self.lang['notenoughargs'].format(exc.args[0], exc.args[1]))
             self.print(self.usage(cmdname))
         except InvalidArgument as exc:
             self.print(self.lang['invalidarg'].format(exc.args[0]))
@@ -1355,11 +1369,11 @@ class AdminCommandExecutor():
         """
         cmd = self.commands[cmdname]
         if cmd.args:
-            mandatory_args = ['<{}: {}>'.format(x[1], self.types[x[0]] if x[0] in self.types else x[0].getTypeName(cmd)) for x in cmd.args]
+            mandatory_args = ['<{}: {}>'.format(x[1], self.types[x[0]] if x[0] in self.types else x[0].getTypeName(self)) for x in cmd.args]
         else:
             mandatory_args = ''
         if cmd.optargs:
-            optional_args = ['[{}: {}]'.format(x[1], self.types[x[0]] if x[0] in self.types else x[0].getTypeName(cmd)) for x in cmd.optargs]
+            optional_args = ['[{}: {}]'.format(x[1], self.types[x[0]] if x[0] in self.types else x[0].getTypeName(self)) for x in cmd.optargs]
         else:
             optional_args = ''
         usage = '{} {} {}'.format(cmdname, ' '.join(mandatory_args), ' '.join(optional_args))
@@ -1497,7 +1511,7 @@ class AdminCommandExecutor():
                     self.tab_complete_seq = tuple()
                 except Exception as exc:
                     # other error
-                    self.error(self.lang['tab_error'].format(str(exc)))
+                    self.error(self.lang['tab_error'].format(f'{type(exc).__name__}: {exc}'))
                     self.tab_complete_seq = tuple()
             self.tab_complete_lastinp = whole_inp
             self.tab_complete_cursor = self.ainput.cursor
@@ -1597,11 +1611,11 @@ class FakeAsyncRawInput():
         # it's a dummy function here
         pass
 
-    def prompt_line(self, prompt="", echo=True, history_disabled=False, prompt_formats: Optional[MutableMapping] = None, input_formats: Optional[MutableMapping] = None):
+    async def prompt_line(self, prompt="", echo=True, history_disabled=False, prompt_formats: Optional[MutableMapping] = None, input_formats: Optional[MutableMapping] = None):
         """Ask a user for input"""
         raise NotImplementedError
 
-    def prompt_keystroke(self, prompt="", echo=True):
+    async def prompt_keystroke(self, prompt="", echo=True):
         """Ask a user to press a key"""
         raise NotImplementedError
 
