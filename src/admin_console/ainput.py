@@ -664,7 +664,7 @@ class AsyncRawInput(AbstractARI):
                 keystroke = ''.join(self.current_input_buffer)
                 index = max(0, min(len(self.keystrokes) - 1, bisect_left(self.keystrokes, keystroke, key=itemgetter(0))))
                 # self.writeln(f'Keystroke: {index}, keystrokes: {repr(self.keystrokes)}')
-                if self.keystrokes[index][0] == keystroke:
+                if self.keystrokes and self.keystrokes[index][0] == keystroke:
                     if asyncio.iscoroutinefunction(self.keystrokes[index][1]):
                         await self.keystrokes[index][1]()
                     else:
