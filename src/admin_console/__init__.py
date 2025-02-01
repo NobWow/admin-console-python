@@ -39,7 +39,7 @@ from itertools import chain, repeat, dropwhile, islice
 from functools import partial
 
 
-__version__ = "1.4.2"
+__version__ = "1.4.4"
 
 
 class CustomType:
@@ -1431,6 +1431,13 @@ class AdminCommandExecutor():
         # loop = asyncio.get_event_loop()
         # loop.add_signal_handler(2, self.ctrl_c)
         while self.prompt_dispatching:
+            try:
+                _cmd_interruptor = self.tasks['cmd_interruptor']
+                if _cmd_interruptor is not None and not _cmd_interruptor.done():
+                    _cmd_interruptor.cancel()
+                    del self.tasks['cmd_interruptor']
+            except KeyError:
+                pass
             inp = await self.ainput.prompt_line('{}{} '.format(self.promptheader, self.promptarrow), prompt_formats=self.prompt_format, input_formats=self.input_format)
             if not inp:
                 continue
