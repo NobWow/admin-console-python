@@ -653,9 +653,10 @@ class AsyncRawInput(AbstractARI):
             self.prompt_formats = format_term(**prompt_formats)
             self.input_formats = format_term(**input_formats)
             if self.stdout.writable():
-                self.stdout.write('\r' + self.prompt_formats[0] + self.read_lastprompt + self.prompt_formats[1])
+                self.stdout.write('\r' + self.prompt_formats[0] + self.read_lastprompt + self.prompt_formats[1] + (
+                    ''.join(self.read_lastinp)))
                 self.stdout.flush()
-            self.cursor = 0
+            self.cursor = len(self.read_lastinp)
             self.echo = echo
             history_pos = 0
             history_incomplete = self.read_lastinp

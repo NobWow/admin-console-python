@@ -15,6 +15,13 @@ async def list_asyncio_tasks(console: AdminCommandExecutor):
         await asyncio.sleep(5)
 
 
+def commands(cmd: AdminCommandExecutor):
+    async def editing_prompt(cmd: AdminCommandExecutor):
+        res = await cmd.ainput.prompt_line(history_disabled=True, start_buffer="edit me")
+        cmd.print(res)
+    cmd.add_command(editing_prompt, "editing-prompt", description="Test editing prompt")
+
+
 async def main(args):
     if len(args) > 0:
         extpath = args[0]
@@ -28,6 +35,7 @@ async def main(args):
     logger.addHandler(_handler)
     _handler.setFormatter(logging.Formatter('-> [%(levelname)s] %(message)s'))
     basic_command_set(console)
+    commands(console)
     if extpath != "no":
         await console.load_extensions()
     else:
