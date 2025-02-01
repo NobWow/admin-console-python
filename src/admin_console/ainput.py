@@ -285,7 +285,9 @@ class AbstractARI(ABC):
         """
         raise NotImplementedError
 
-    async def prompt_line(self, prompt="> ", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
+    async def prompt_line(self, prompt="> ", echo=True, history_disabled=False,
+                          prompt_formats={}, input_formats={},
+                          start_buffer: Optional[str] = None):
         """
         Start reading a single-line user input with prompt.
         Asynchronous version of input(prompt), handling the keystrokes.
@@ -308,6 +310,9 @@ class AbstractARI(ABC):
         input_formats : dict
             Dictionary of text formatting settings that are passed into format_term
             self.input_formats = format_term(**input_formats)
+        start_buffer : Optional[str] = None
+            If specified, the string will be used as a starting point after which the
+            contents can be edited in the prompt line.
         """
         pass
 
@@ -629,7 +634,8 @@ class AsyncRawInput(AbstractARI):
         except BlockingIOError:
             self.read_clk.set()
 
-    async def prompt_line(self, prompt="> ", echo=True, history_disabled=False, prompt_formats={}, input_formats={}):
+    async def prompt_line(self, prompt="> ", echo=True, history_disabled=False,
+                          prompt_formats={}, input_formats={}, start_buffer: Optional[str] = None):
         self._promptline_scroll = 0
         try:
             _task = asyncio.current_task()
@@ -639,6 +645,8 @@ class AsyncRawInput(AbstractARI):
             self.is_reading = True
             if self.read_lastinp is None:
                 self.read_lastinp = []
+            elif start_buffer:
+                self.read_lastinp = list(start_buffer)
             else:
                 self.read_lastinp.clear()
             self.read_lastprompt = prompt
